@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RVSim C3 — ESP32-C3 RISC-V Assembly Simulator</title>
+  <meta name="description" content="Write RISC-V assembly, run it on a simulated ESP32-C3 and wire up LEDs, buttons and 7-segment displays in your browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2318202e'/%3E%3Crect x='8' y='8' width='16' height='16' rx='2' fill='%2330d158'/%3E%3Cpath d='M4 12h4M4 20h4M24 12h4M24 20h4M12 4v4M20 4v4M12 24v4M20 24v4' stroke='%23c9a74a' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body data-sim="stopped">
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#18202e"/><rect x="8" y="8" width="16" height="16" rx="2" fill="#30d158"/><path d="M4 12h4M4 20h4M24 12h4M24 20h4M12 4v4M20 4v4M12 24v4M20 24v4" stroke="#c9a74a" stroke-width="2"/></svg>
+      <span class="name">RV<b>Sim</b> C3</span>
+      <span class="tagline">ESP32-C3 · RISC-V assembly simulator</span>
+    </div>
+
+    <nav class="tb-group">
+      <div class="menu">
+        <button type="button">Examples ▾</button>
+        <div class="menu-list wide" id="examplesMenu"></div>
+      </div>
+      <button type="button" id="btnNew">New</button>
+      <button type="button" id="btnOpen">Open…</button>
+      <input type="file" id="fileInput" accept=".json,.s,.S,.asm,.txt" hidden>
+      <div class="menu">
+        <button type="button" id="btnSave">Save ▾</button>
+        <div class="menu-list">
+          <button type="button" id="saveJson"><b>Project (.json)</b><span>Code, parts and wiring</span></button>
+          <button type="button" id="saveAsm"><b>Source (.S)</b><span>Assembly code only</span></button>
+        </div>
+      </div>
+      <button type="button" id="btnShare" title="Copy a link containing the whole project">Share</button>
+    </nav>
+
+    <div class="tb-group sim-controls">
+      <button type="button" id="btnRun" class="run" title="Run / Resume (F5)">▶ Run</button>
+      <button type="button" id="btnPause" title="Pause (F5)">❚❚</button>
+      <button type="button" id="btnStep" title="Step one instruction (F10)">Step</button>
+      <button type="button" id="btnStop" class="stop" title="Stop &amp; reset">■</button>
+      <select id="speedSel" title="Simulation clock">
+        <option value="160000000">Real-time (160 MHz)</option>
+        <option value="16000000">1/10 speed</option>
+        <option value="1600000">1/100 speed</option>
+        <option value="100000">100 kHz</option>
+        <option value="10000">10 kHz</option>
+        <option value="1000">1 kHz (trace)</option>
+        <option value="100">100 Hz (trace)</option>
+        <option value="10">10 Hz (trace)</option>
+        <option value="2">2 Hz (trace)</option>
+      </select>
+    </div>
+
+    <div class="status" id="status"></div>
+  </header>
+
+  <main class="layout" id="layout">
+    <section class="pane editor-pane">
+      <div class="pane-head">
+        <span class="file-tab">main.S</span>
+        <span id="modFlag" class="mod"></span>
+        <span class="spacer"></span>
+        <button type="button" id="btnAssemble" title="Check the program for errors">Assemble</button>
+      </div>
+      <div class="editor">
+        <div class="gutter" id="gutter"></div>
+        <div class="code-wrap">
+          <pre class="code-hl" id="codeHl" aria-hidden="true"></pre>
+          <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-label="Assembly source code"></textarea>
+        </div>
+      </div>
+      <div class="problems" id="problems"></div>
+    </section>
+
+    <div class="splitter v" id="splitV" title="Drag to resize"></div>
+
+    <section class="pane right-pane">
+      <div class="stage-wrap">
+        <div class="stage-toolbar">
+          <span class="dim">Add part:</span>
+          <button type="button" data-add="led"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 9V6a4 4 0 0 1 8 0v3z" fill="#ff3b30"/><path d="M6 9v6M10 9v4" stroke="currentColor"/></svg>LED</button>
+          <button type="button" data-add="button"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1.5" y="1.5" width="13" height="13" rx="2" fill="none" stroke="currentColor"/><circle cx="8" cy="8" r="4" fill="#e5383b"/></svg>Button</button>
+          <button type="button" data-add="switch"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1" y="4" width="14" height="8" rx="1.5" fill="#2f6fd6"/><rect x="2.5" y="5.5" width="5" height="5" fill="#fff"/></svg>Switch</button>
+          <button type="button" data-add="sevenseg"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M5 2h6M4 3v4.5M12 3v4.5M5 8h6M4 9v4.5M12 9v4.5M5 14h6" stroke="#ff3b30" stroke-width="1.6"/></svg>7-Segment</button>
+          <span class="spacer"></span>
+          <button type="button" class="icon" id="zoomOut" title="Zoom out">−</button>
+          <button type="button" class="icon" id="zoomIn" title="Zoom in">+</button>
+          <button type="button" class="icon" id="zoomFit" title="Fit to view">⤢</button>
+        </div>
+        <svg id="stage" role="application" aria-label="Breadboard: ESP32-C3 board and parts"></svg>
+        <div class="stage-hint" id="stageHint" hidden></div>
+        <div class="inspector" id="inspector" hidden></div>
+        <div class="stage-help">Drag parts to move · click a part pin then a board GPIO pin to wire · scroll to zoom · drag background to pan</div>
+      </div>
+
+      <div class="splitter h" id="splitH" title="Drag to resize"></div>
+
+      <div class="bottom">
+        <div class="tabs" role="tablist">
+          <button type="button" data-tab="serial" class="active">Serial Monitor</button>
+          <button type="button" data-tab="regs">Registers</button>
+          <button type="button" data-tab="mem">Memory</button>
+          <button type="button" data-tab="gpio">GPIO</button>
+          <button type="button" data-tab="listing">Listing</button>
+          <button type="button" data-tab="docs">Reference</button>
+        </div>
+        <div class="tab-body">
+          <section id="tab-serial" class="serial">
+            <pre id="serialOut"></pre>
+            <form id="serialForm" autocomplete="off">
+              <input id="serialIn" placeholder="Send text to UART0 RX…">
+              <select id="serialEol" title="Line ending">
+                <option value="lf">LF</option>
+                <option value="crlf">CR+LF</option>
+                <option value="cr">CR</option>
+                <option value="none">None</option>
+              </select>
+              <button type="submit">Send</button>
+              <button type="button" id="serialClear">Clear</button>
+            </form>
+          </section>
+
+          <section id="tab-regs" hidden>
+            <div class="panel-head">
+              <select id="regFmt"><option value="hex">Hex</option><option value="dec">Signed</option><option value="udec">Unsigned</option></select>
+              <span class="dim mono" id="cpuInfo"></span>
+            </div>
+            <div class="regs" id="regs"></div>
+          </section>
+
+          <section id="tab-mem" hidden>
+            <form class="panel-head" id="memForm">
+              <input id="memAddr" class="mono" placeholder="0x3fca0000 or label" value="0x3fca0000">
+              <button type="submit">Go</button>
+              <select id="memPresets"><option value="">symbols…</option></select>
+              <span class="dim">SRAM: 0x3FC80000–0x3FCDFFFF (data) = 0x40380000–0x403DFFFF (code)</span>
+            </form>
+            <div class="memdump mono" id="memDump"></div>
+          </section>
+
+          <section id="tab-gpio" hidden>
+            <div class="panel-head mono dim" id="gpioRegs"></div>
+            <table class="grid">
+              <thead><tr><th>Pin</th><th>Note</th><th>Direction</th><th>OUT bit</th><th>Level</th><th>Connected to</th></tr></thead>
+              <tbody id="gpioBody"></tbody>
+            </table>
+          </section>
+
+          <section id="tab-listing" hidden>
+            <table class="grid listing">
+              <thead><tr><th>Address</th><th>Machine code</th><th>Line</th><th>Source</th></tr></thead>
+              <tbody id="listBody"></tbody>
+            </table>
+            <div class="symlist mono" id="symList"></div>
+          </section>
+
+          <section id="tab-docs" class="docs" hidden>
+            <h3>Quick start</h3>
+            <ol>
+              <li>Write RISC-V (RV32IM) assembly in the editor, or pick one of the <b>Examples</b>.</li>
+              <li>Add parts with the toolbar above the board. Wire a part by clicking one of its pins and then a <b>GPIO pin</b> on the board (or choose the GPIO in the part's settings panel). Ground / 3V3 are connected automatically.</li>
+              <li>Press <b>▶ Run</b> (F5). Use <b>Step</b> (F10), breakpoints (click a line number) and <code>ebreak</code> to debug. Choose a slow speed such as <i>10 Hz (trace)</i> to watch each instruction execute.</li>
+            </ol>
+
+            <h3>Memory map</h3>
+            <table class="grid">
+              <tr><th>Address</th><th>Region</th></tr>
+              <tr><td class="mono">0x40380000</td><td><code>.text</code> — your code (internal SRAM, instruction bus)</td></tr>
+              <tr><td class="mono">0x3FCA0000</td><td><code>.data</code> / <code>.bss</code> / <code>.rodata</code> — your variables</td></tr>
+              <tr><td class="mono">0x3FCDFFF0</td><td>initial stack pointer <code>sp</code> (stack grows down); <code>gp</code> = start of .data</td></tr>
+              <tr><td class="mono">0x60000000</td><td>UART0</td></tr>
+              <tr><td class="mono">0x60004000</td><td>GPIO</td></tr>
+              <tr><td class="mono">0x60009000</td><td>IO_MUX (accepted, not modelled)</td></tr>
+              <tr><td class="mono">0x60023000</td><td>SYSTIMER (16 MHz counter)</td></tr>
+              <tr><td class="mono">0x60043000</td><td>USB Serial/JTAG (EP1 writes go to the serial monitor)</td></tr>
+            </table>
+            <p>Execution starts at <code>_start</code>, else <code>main</code>, else the first instruction. Other peripheral addresses (0x60000000–0x600D0FFF) read back what was written, so watchdog and clock setup code does no harm.</p>
+
+            <h3>GPIO registers (base 0x60004000)</h3>
+            <table class="grid">
+              <tr><th>Offset</th><th>Name</th><th>Description</th></tr>
+              <tr><td class="mono">0x04</td><td>GPIO_OUT_REG</td><td>Output level of GPIO0–21 (bit n = GPIOn)</td></tr>
+              <tr><td class="mono">0x08</td><td>GPIO_OUT_W1TS_REG</td><td>Write 1s to set output bits</td></tr>
+              <tr><td class="mono">0x0C</td><td>GPIO_OUT_W1TC_REG</td><td>Write 1s to clear output bits</td></tr>
+              <tr><td class="mono">0x20</td><td>GPIO_ENABLE_REG</td><td>Output enable (1 = output, 0 = input)</td></tr>
+              <tr><td class="mono">0x24</td><td>GPIO_ENABLE_W1TS_REG</td><td>Write 1s to make pins outputs</td></tr>
+              <tr><td class="mono">0x28</td><td>GPIO_ENABLE_W1TC_REG</td><td>Write 1s to make pins inputs</td></tr>
+              <tr><td class="mono">0x3C</td><td>GPIO_IN_REG</td><td>Current level of every pin (read-only)</td></tr>
+            </table>
+            <p>Inputs are always readable in the simulator. On real hardware also set <code>FUN_IE</code> (bit 9) and optionally <code>FUN_WPU</code> (bit 8, pull-up) in <code>IO_MUX_GPIOn_REG</code> = 0x60009004 + 4·n.</p>
+
+            <h3>SYSTIMER (base 0x60023000)</h3>
+            <table class="grid">
+              <tr><th>Offset</th><th>Name</th><th>Description</th></tr>
+              <tr><td class="mono">0x04</td><td>UNIT0_OP_REG</td><td>Write bit 30 (UPDATE) to latch the counter; bit 29 (VALUE_VALID) reads 1</td></tr>
+              <tr><td class="mono">0x40</td><td>UNIT0_VALUE_HI_REG</td><td>Latched counter bits [51:32]</td></tr>
+              <tr><td class="mono">0x44</td><td>UNIT0_VALUE_LO_REG</td><td>Latched counter bits [31:0] — 16 000 ticks per ms</td></tr>
+            </table>
+
+            <h3>UART0 (base 0x60000000)</h3>
+            <table class="grid">
+              <tr><th>Offset</th><th>Name</th><th>Description</th></tr>
+              <tr><td class="mono">0x00</td><td>UART_FIFO_REG</td><td>Write: transmit a byte · Read: receive a byte</td></tr>
+              <tr><td class="mono">0x1C</td><td>UART_STATUS_REG</td><td>bits [9:0] RXFIFO_CNT, bits [25:16] TXFIFO_CNT (always 0)</td></tr>
+            </table>
+
+            <h3>Simulator ecall services</h3>
+            <p>Simulator-only conveniences (like RARS/Venus) — real hardware has no OS to answer them. Put the service number in <code>a7</code>, the argument in <code>a0</code>.</p>
+            <table class="grid">
+              <tr><th>a7</th><th>Service</th><th>a7</th><th>Service</th></tr>
+              <tr><td>1</td><td>print int a0</td><td>32</td><td>sleep a0 milliseconds</td></tr>
+              <tr><td>4</td><td>print string at a0</td><td>30</td><td>a0/a1 = milliseconds since start</td></tr>
+              <tr><td>11</td><td>print char a0</td><td>12</td><td>read char → a0 (−1 if none)</td></tr>
+              <tr><td>34</td><td>print hex a0</td><td>35 / 36</td><td>print binary / unsigned</td></tr>
+              <tr><td>10</td><td>exit</td><td>93</td><td>exit with code a0</td></tr>
+            </table>
+
+            <h3>Assembler</h3>
+            <p><b>Instructions:</b> all of RV32I and the M extension, plus Zicsr (<code>csrrw/s/c[i]</code>), <code>ecall</code>, <code>ebreak</code>, <code>fence</code>, <code>wfi</code>, <code>mret</code>.<br>
+            <b>Pseudo-instructions:</b> <code>nop li la mv not neg seqz snez sltz sgtz beqz bnez blez bgez bltz bgtz bgt ble bgtu bleu j jr jal&nbsp;label ret call tail csrr csrw csrs csrc rdcycle rdtime rdinstret</code>, <code>lw rd, label</code> and <code>sw rs, label, rt</code>.<br>
+            <b>Directives:</b> <code>.text .data .bss .rodata .section .equ/.set (or NAME = value) .word .half .byte .ascii .asciz/.string .space/.zero .align .balign .globl</code>.<br>
+            <b>Expressions:</b> <code>+ - * / % &lt;&lt; &gt;&gt; &amp; | ^ ~</code>, parentheses, <code>'c'</code> characters, <code>0x</code>/<code>0b</code> numbers, <code>%hi(sym)</code>/<code>%lo(sym)</code>.<br>
+            <b>Labels:</b> <code>name:</code> and numeric local labels (<code>1:</code> referenced as <code>1b</code> / <code>1f</code>). Comments start with <code>#</code>, <code>//</code> or <code>;</code>, or use <code>/* … */</code>.</p>
+
+            <h3>Board pins (ESP32-C3-DevKitM-1)</h3>
+            <p>Usable GPIOs: 0–10 and 18–21. GPIO9 is the on-board <b>BOOT</b> button (active low). GPIO20/21 are UART0 RX/TX, GPIO18/19 USB. The <b>RST</b> button restarts the program.</p>
+
+            <h3>Keyboard</h3>
+            <p><kbd>F5</kbd> run/pause · <kbd>F10</kbd> step · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> restart · <kbd>Ctrl</kbd>+<kbd>S</kbd> save in browser · <kbd>Del</kbd> delete selected part/wire · <kbd>Esc</kbd> cancel wiring. Buttons can be given a keyboard key in their settings.</p>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="js/assembler.js"></script>
+  <script src="js/cpu.js"></script>
+  <script src="js/esp32c3.js"></script>
+  <script src="js/components.js"></script>
+  <script src="js/examples.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
