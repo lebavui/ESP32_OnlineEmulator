@@ -171,6 +171,9 @@ ${DELAY_MS}`,
         .equ GPIO_OUT,          0x04
         .equ GPIO_ENABLE_W1TS,  0x24
         .equ GPIO_IN,           0x3C
+        .equ IO_MUX_BASE,       0x60009000
+        .equ FUN_WPU,           1 << 8   # weak pull-up
+        .equ FUN_IE,            1 << 9   # input enable
         .equ SYSTIMER_BASE,     0x60023000
         .equ SEG_MASK,          0xFF
         .equ BTN_PIN,           10
@@ -184,6 +187,10 @@ main:
         li      t0, SEG_MASK
         sw      t0, GPIO_ENABLE_W1TS(s0)
         la      s1, digits
+        # IO_MUX_GPIOn_REG: input enable + pull-up (the button connects the pin to GND)
+        li      t0, IO_MUX_BASE + 4 + 4 * BTN_PIN
+        li      t1, FUN_IE | FUN_WPU
+        sw      t1, 0(t0)
         li      s2, 0                   # count
         li      s3, 1 << BTN_PIN
         li      s4, 1                   # previous button level (1 = released)

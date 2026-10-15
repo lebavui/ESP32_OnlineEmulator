@@ -24,7 +24,9 @@
   let simState = 'stopped';    // stopped | running | paused | halted
   let activeBps = new Set();
   let selection = null;        // {kind:'comp', id} | {kind:'wire', id, pin}
-  let pending = null;          // wire being drawn: {kind:'comp', id, pin} | {kind:'board', gpio}
+  let pending = null;          // wire being drawn: {kind:'comp', id, pin} | {kind:'board', gpio} | {kind:'board', key}
+  let autoPower = true;        // parts' GND / 3V3 pins are connected automatically
+  let wireStyle = 'curve';     // 'curve' | 'ortho' (horizontal / vertical segments with user-placed corners)
   let bootPressed = false;
 
   // ================================================================ helpers
@@ -285,6 +287,7 @@
       return false;
     }
     loadedSource = ta.value;
+    ioWarned = 0;
     applyInputs();
     clearSerial();
     prevRegs = null;
@@ -400,6 +403,10 @@
     if (simState === 'running') requestAnimationFrame(frame);
   }
 
+  // Part settings are locked while a program is loaded (running, paused or halted).
+  const simActive = () => simState !== 'stopped';
+  const SETTINGS_LOCKED = 'Stop the simulation to change part settings';
+
   function updateControls() {
     const running = simState === 'running';
     $('#btnRun').disabled = running;
@@ -407,6 +414,7 @@
     $('#btnStop').disabled = simState === 'stopped';
     $('#btnRun').innerHTML = simState === 'paused' ? '▶ Resume' : '▶ Run';
     document.body.dataset.sim = simState;
+    if (simActive() && selection) select(null); // no part settings while simulating
     updateModified();
   }
 
@@ -436,6 +444,7 @@
   }
 
   function updateAll(force) {
+    checkInputWarnings();
     updateStage();
     flushSerial();
     updateStatus();
@@ -458,33 +467,51 @@
 
   // ================================================================ inputs (buttons / switches)
 
+  // Buttons and switches only connect a pin to GND or 3V3. A released button leaves its pin
+  // floating, so the program needs a pull-up / pull-down (FUN_WPU / FUN_WPD in IO_MUX).
   function applyInputs() {
-    const pull = new Array(22).fill(0);   // 0 none, 1 up, -1 down
-    const force = new Array(22).fill(null);
-    pull[9] = 1;                         // BOOT button has an external pull-up
-    if (bootPressed) force[9] = 0;
+    let force = 0, value = 0;
+    const set = (g, v) => { if (!((force >>> g) & 1)) { force |= 1 << g; if (v) value |= 1 << g; } };
+    if (bootPressed) set(9, 0);
     for (const c of comps) {
       const g = c.conn['1'];
       if (g === undefined || g === null) continue;
       if (c.type === 'button') {
-        if (c.props.mode === 'pulldown') {
-          if (!pull[g]) pull[g] = -1;
-          if (c.pressed && force[g] === null) force[g] = 1;
-        } else {
-          pull[g] = 1;
-          if (c.pressed) force[g] = 0;
-        }
+        if (c.pressed && isPowered(c)) set(g, c.props.mode === 'pulldown' ? 1 : 0);
       } else if (c.type === 'switch') {
-        force[g] = c.props.on ? 1 : 0;
+        const v = PARTS.switch.level(c, autoPower);
+        if (v !== null) set(g, v);
       }
     }
-    let level = 0;
-    for (let i = 0; i < 22; i++) {
-      const v = force[i] !== null ? force[i] : pull[i] > 0 ? 1 : 0;
-      if (v) level |= 1 << i;
-    }
-    machine.setExternal(level);
+    machine.setExternal({ force, value, pullUp: 1 << 9 });   // the DevKit has a pull-up on GPIO9 (BOOT)
     if (simState !== 'running') updateAll(true);
+  }
+
+  // Warn (once per run and pin) when the program reads a button / switch pin that is
+  // floating or has its input buffer turned off: it works by luck on real hardware, or not at all.
+  let ioWarned = 0;
+  function inputPartPins() {
+    let mask = 0;
+    for (const c of comps) {
+      const g = c.conn['1'];
+      if ((c.type === 'button' || c.type === 'switch') && g !== undefined && g !== null) mask |= 1 << g;
+    }
+    return mask;
+  }
+  function checkInputWarnings() {
+    const pins = inputPartPins();
+    const ieOff = machine.ieOffReads & pins & ~ioWarned;
+    const floating = machine.floatReads & pins & ~ioWarned & ~ieOff;
+    if (!ieOff && !floating) return;
+    const list = m => GPIO_PINS.filter(g => (m >>> g) & 1);
+    for (const g of list(ieOff)) {
+      appendSystem(`⚠ GPIO${g} was read with FUN_IE = 0 (input disabled), so it always reads 0. Set bit 9 of IO_MUX_GPIO${g}_REG (0x${(0x60009004 + 4 * g).toString(16).toUpperCase()}).`, true);
+    }
+    for (const g of list(floating)) {
+      appendSystem(`⚠ GPIO${g} was read while floating (nothing connected to GND / 3V3 and no pull resistor): real hardware reads random values. Enable FUN_WPU (bit 8, pull-up) or FUN_WPD (bit 7, pull-down) in IO_MUX_GPIO${g}_REG.`, true);
+    }
+    toast(`GPIO${list(ieOff | floating).join(', GPIO')}: input not set up correctly, see the serial monitor`, 'error');
+    ioWarned |= ieOff | floating;
   }
 
   function pressButton(c, down) {
@@ -530,25 +557,80 @@
   const BOARD = { w: 180, h: 476, y0: 78, pitch: 24, lx: 14, rx: 166 };
   const LEFT_PINS = ['GND', '3V3', '3V3', '2', '3', 'GND', 'RST', 'GND', '0', '1', '10', 'GND', '5V', '5V', 'GND'];
   const RIGHT_PINS = ['GND', '21', '20', 'GND', '9', '8', 'GND', '7', '6', '5', '4', 'GND', '18', '19', 'GND'];
-  const boardPinPos = new Map();
+  const boardPinPos = new Map();        // GPIO number or power pin key -> {x, y, side}
+  // Power pins, keyed by side + index ('L0', 'R3', ...) because GND appears many times.
+  const POWER_PINS = {};
+  [['L', LEFT_PINS], ['R', RIGHT_PINS]].forEach(([side, list]) => list.forEach((l, i) => {
+    if (/^(GND|3V3|5V)$/.test(l)) POWER_PINS[side + i] = l;
+  }));
+  const POWER_COLORS = { GND: '#6b7280', '3V3': '#ff453a' };
+
+  const hasConn = (c, pin) => c.conn[pin] !== undefined && c.conn[pin] !== null;
+  const powerPins = def => def.power || [];
+  const findPin = (def, name) => def.pins.find(p => p.name === name) || powerPins(def).find(p => p.name === name);
+  const isPowerPin = (def, name) => powerPins(def).some(p => p.name === name);
+  const pinLabelOf = (def, c, p) => def.pinLabel ? def.pinLabel(c, p) : p.label;
+  const targetName = t => typeof t === 'number' ? 'GPIO' + t : POWER_PINS[t];
+
+  // A part works when auto power is on, or when its supply pin(s) are wired.
+  function isPowered(c) {
+    const pp = powerPins(PARTS[c.type]);
+    if (autoPower || !pp.length) return true;
+    return PARTS[c.type].powerAny ? pp.some(p => hasConn(c, p.name)) : pp.every(p => hasConn(c, p.name));
+  }
+
+  // Wire a supply pin to a board power pin; the rail sets the part's wiring mode.
+  // Returns the supply pins that had to be disconnected because they now sit on the wrong rail.
+  function attachPower(c, pin, key) {
+    c.conn[pin] = key;
+    PARTS[c.type].setRail(c, pin, POWER_PINS[key]);
+    return dropMismatchedPower(c);
+  }
+
+  function dropMismatchedPower(c) {
+    const def = PARTS[c.type], dropped = [];
+    for (const p of powerPins(def)) {
+      if (hasConn(c, p.name) && POWER_PINS[c.conn[p.name]] !== def.rail(c, p.name)) {
+        delete c.conn[p.name];
+        if (c.route) delete c.route[p.name];
+        dropped.push(p.name);
+      }
+    }
+    return dropped;
+  }
+
+  // Board pin with the given label that is closest to a part's pin.
+  function nearestPowerPin(c, pin, label) {
+    const p = findPin(PARTS[c.type], pin), x = c.x + p.x, y = c.y + p.y;
+    let best = null, bestD = Infinity;
+    for (const [key, l] of Object.entries(POWER_PINS)) {
+      if (l !== label) continue;
+      const bp = boardPinPos.get(key), d = Math.hypot(bp.x - x, bp.y - y);
+      if (d < bestD) { bestD = d; best = key; }
+    }
+    return best;
+  }
 
   function boardSvg() {
     let pins = '';
-    const pin = (label, x, y, side) => {
+    const pin = (label, x, y, side, key) => {
       const isGpio = /^\d+$/.test(label);
+      const isPower = !!POWER_PINS[key];
       if (isGpio) boardPinPos.set(+label, { x, y, side });
-      const tip = isGpio ? gpioLabel(+label) : label === 'RST' ? 'RST (chip enable)' : label + ' (power — connected automatically)';
+      if (isPower) boardPinPos.set(key, { x, y, side });
+      const tip = isGpio ? gpioLabel(+label) : label === 'RST' ? 'RST (chip enable)'
+        : label === 'GND' ? 'GND (ground)' : label + ' (supply)';
       const tx = side === 'L' ? x + 13 : x - 13;
       const text = isGpio ? 'IO' + label : label;
-      return `<g class="bpin${isGpio ? ' gpio' : ' power'}" data-pin="${label}" transform="translate(${x} ${y})">
+      return `<g class="bpin${isGpio ? ' gpio' : ' power'}${isPower ? ' rail' : ''}" data-pin="${isPower ? key : label}" transform="translate(${x} ${y})">
           <rect x="-8" y="-8" width="16" height="16" rx="2" class="pin-pad"/>
           <circle r="4.2" class="pin-hole"/><circle r="9" class="pin-hit"/>
           <title>${esc(tip)}</title>
         </g>
         <text x="${tx}" y="${y + 3}" class="pin-label${isGpio ? '' : ' pwr'}" text-anchor="${side === 'L' ? 'start' : 'end'}">${text}</text>`;
     };
-    LEFT_PINS.forEach((l, i) => { pins += pin(l, BOARD.lx, BOARD.y0 + i * BOARD.pitch, 'L'); });
-    RIGHT_PINS.forEach((l, i) => { pins += pin(l, BOARD.rx, BOARD.y0 + i * BOARD.pitch, 'R'); });
+    LEFT_PINS.forEach((l, i) => { pins += pin(l, BOARD.lx, BOARD.y0 + i * BOARD.pitch, 'L', 'L' + i); });
+    RIGHT_PINS.forEach((l, i) => { pins += pin(l, BOARD.rx, BOARD.y0 + i * BOARD.pitch, 'R', 'R' + i); });
     const antenna = 'M60 22 h56 v6 h-50 v6 h50 v6 h-56';
     return `
       <g class="board">
@@ -594,17 +676,22 @@
     compLayer.innerHTML = comps.map(c => {
       const def = PARTS[c.type];
       const sel = selection && selection.kind === 'comp' && selection.id === c.id;
-      const pins = def.pins.map(p => {
+      const pins = def.pins.concat(autoPower ? [] : powerPins(def)).map(p => {
         const g = c.conn[p.name];
         const conn = g !== undefined && g !== null;
-        return `<g class="cpin${conn ? ' connected' : ''}" data-comp="${c.id}" data-pin="${p.name}" transform="translate(${p.x} ${p.y})">
+        const pwr = isPowerPin(def, p.name);
+        const label = pinLabelOf(def, c, p) + (pwr ? ' → ' + def.rail(c, p.name) : '');
+        const hint = pwr ? ' — click, then click a GND or 3V3 pin on the board' : ' — click, then click a GPIO pin on the board';
+        // With powerAny, one wired supply pin is enough, so don't nag about the other one.
+        const ok = conn || (pwr && def.powerAny && isPowered(c));
+        return `<g class="cpin${ok ? ' connected' : ''}${pwr ? ' pwr' : ''}" data-comp="${c.id}" data-pin="${p.name}" transform="translate(${p.x} ${p.y})">
             <circle r="8" class="pin-hit"/><circle r="3.4" class="dot"/>
-            <title>${esc(c.id)} · ${esc(p.label)}${conn ? ' → GPIO' + g : ' — click, then click a GPIO pin on the board'}</title>
+            <title>${esc(c.id)} · ${esc(label)}${conn ? ' → ' + targetName(g) : hint}</title>
           </g>`;
       }).join('');
       return `<g class="comp${sel ? ' selected' : ''}" data-id="${c.id}" transform="translate(${c.x} ${c.y})">
           <rect class="sel-box" x="-8" y="-14" width="${def.w + 16}" height="${def.h + 22}" rx="6"/>
-          <g class="body">${def.render(c)}</g>
+          <g class="body">${def.render(c, { auto: autoPower })}</g>
           ${pins}
           <text class="comp-label" x="${def.w / 2}" y="${def.h + 20}" text-anchor="middle">${esc(c.id)}</text>
         </g>`;
@@ -613,7 +700,9 @@
     for (const el of compLayer.children) compEls.set(el.dataset.id, el);
   }
 
-  function wireColor(g) { return WIRE_COLORS[GPIO_PINS.indexOf(g) % WIRE_COLORS.length]; }
+  function wireColor(g) {
+    return typeof g === 'number' ? WIRE_COLORS[GPIO_PINS.indexOf(g) % WIRE_COLORS.length] : POWER_COLORS[POWER_PINS[g]];
+  }
 
   function wirePath(ax, ay, dir, bp) {
     const dy = dir === 'up' ? -1 : 1;
@@ -623,26 +712,193 @@
     return `M${ax} ${ay} C${ax} ${ay + dy * reach} ${c2x} ${bp.y} ${bp.x} ${bp.y}`;
   }
 
-  function renderWires() {
+  // ---- horizontal / vertical wires
+  const snap5 = v => Math.round(v / 5) * 5;
+
+  // Points through pts using only horizontal and vertical segments: a corner is inserted
+  // between points that aren't in line. prevH = the segment leading into pts[0] was horizontal.
+  function orthoPoints(pts, prevH) {
+    let cur = { x: pts[0].x, y: pts[0].y };
+    const out = [cur];
+    for (let i = 1; i < pts.length; i++) {
+      const p = { x: pts[i].x, y: pts[i].y };
+      if (p.x === cur.x && p.y === cur.y) continue;
+      if (p.x !== cur.x && p.y !== cur.y) {
+        // keep going the way the previous segment went, then turn
+        out.push(prevH ? { x: p.x, y: cur.y } : { x: cur.x, y: p.y });
+        prevH = !prevH;
+      } else prevH = p.y === cur.y;
+      out.push(p);
+      cur = p;
+    }
+    return out;
+  }
+  const polyD = pts => 'M' + pts.map(p => `${p.x} ${p.y}`).join(' L');
+  const orthoD = (pts, prevH) => polyD(orthoPoints(pts, prevH));
+
+  // Every point of a wire, from a part pin (exits vertically) through the user's corners
+  // to a board pin; all segments are horizontal or vertical.
+  function orthoWirePoints(ax, ay, dir, bp, route, g) {
+    const a = { x: ax, y: ay };
+    if (route && route.length) return orthoPoints([a, ...route, bp], false);
+    const dy = dir === 'up' ? -1 : 1;
+    // Board pin ahead of the part pin: straight out to its row, then across.
+    if ((bp.y - ay) * dy >= 16) return orthoPoints([a, bp], false);
+    // Otherwise leave the pin, run beside the board (lanes keep neighbouring wires apart), then go in.
+    const lane = typeof g === 'number' ? (GPIO_PINS.indexOf(g) % 4) * 5 : 0;
+    const sy = ay + dy * 16, mx = bp.x + (bp.side === 'L' ? -1 : 1) * (20 + lane);
+    return orthoPoints([a, { x: ax, y: sy }, { x: mx, y: sy }, { x: mx, y: bp.y }, bp], false);
+  }
+
+  // Drop repeated points and points in the middle of a straight run.
+  function simplifyPoints(pts) {
+    const out = [];
+    for (const p of pts) {
+      const n = out.length;
+      if (n && out[n - 1].x === p.x && out[n - 1].y === p.y) continue;
+      if (n >= 2) {
+        const a = out[n - 2], b = out[n - 1];
+        if ((a.x === b.x && b.x === p.x) || (a.y === b.y && b.y === p.y)) out.pop();
+      }
+      out.push(p);
+    }
+    return out;
+  }
+
+  // ---- editing the corners of a selected wire (Tinkercad-style handles)
+  // A wire's full point list; null if it isn't drawn.
+  function wirePointsOf(c, pin) {
+    const def = PARTS[c.type], p = findPin(def, pin), g = c.conn[pin];
+    const bp = g === undefined || g === null ? null : boardPinPos.get(g);
+    if (!p || !bp) return null;
+    return orthoWirePoints(c.x + p.x, c.y + p.y, p.dir, bp, c.route && c.route[pin], g);
+  }
+
+  function setWirePoints(c, pin, pts) {
+    if (!c.route) c.route = {};
+    c.route[pin] = pts.slice(1, -1);
+  }
+
+  // Corner i moves to `to`; neighbouring corners slide with it so their segments stay
+  // horizontal / vertical. Pins never move: next to a pin, a small jog keeps its segment straight.
+  function moveCorner(P, i, to) {
+    const n = P.length, old = P[i];
+    const out = P.map(q => ({ x: q.x, y: q.y }));
+    out[i] = { x: to.x, y: to.y };
+    for (const j of [i - 1, i + 1]) {
+      if (j <= 0 || j >= n - 1) continue;
+      if (P[j].y === old.y && P[j].x !== old.x) out[j].y = to.y;
+      else if (P[j].x === old.x && P[j].y !== old.y) out[j].x = to.x;
+    }
+    // points from the pin towards corner c
+    const jog = (pin, c) => {
+      if (pin.x === old.x && c.x !== pin.x) { const my = snap5((pin.y + c.y) / 2); return [{ x: pin.x, y: my }, { x: c.x, y: my }]; }
+      if (pin.y === old.y && c.y !== pin.y) { const mx = snap5((pin.x + c.x) / 2); return [{ x: mx, y: pin.y }, { x: mx, y: c.y }]; }
+      return [];
+    };
+    const head = i === 1 ? jog(out[0], out[1]) : [];
+    const tail = i === n - 2 ? jog(out[n - 1], out[n - 2]).reverse() : [];
+    return [out[0], ...head, ...out.slice(1, n - 1), ...tail, out[n - 1]];
+  }
+
+  // Segment i (P[i] -> P[i+1]) moves sideways by delta. An end that is a pin, or whose other
+  // segment runs the same way, keeps a new corner at its old place so the wire stays connected.
+  function moveSegment(P, i, delta) {
+    const n = P.length, horiz = P[i].y === P[i + 1].y;
+    const parallel = (a, b) => horiz ? P[a].y === P[b].y : P[a].x === P[b].x;
+    const shift = q => horiz ? { x: q.x, y: q.y + delta } : { x: q.x + delta, y: q.y };
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const q = { x: P[k].x, y: P[k].y };
+      if (k === i) {
+        if (k === 0 || parallel(k - 1, k)) out.push(q);
+        out.push(shift(q));
+      } else if (k === i + 1) {
+        out.push(shift(q));
+        if (k === n - 1 || parallel(k, k + 1)) out.push(q);
+      } else out.push(q);
+    }
+    return out;
+  }
+
+  function wireHandles(c, pin, P) {
     let html = '';
+    for (let i = 0; i < P.length - 1; i++) {
+      const a = P[i], b = P[i + 1], horiz = a.y === b.y;
+      if (Math.abs(b.x - a.x) + Math.abs(b.y - a.y) < 16) continue;
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      html += `<rect class="whandle seg" data-seg="${i}" x="${mx - (horiz ? 6 : 2.5)}" y="${my - (horiz ? 2.5 : 6)}" width="${horiz ? 12 : 5}" height="${horiz ? 5 : 12}" rx="2">
+          <title>Drag to move this segment${i === 0 || i === P.length - 2 ? ' (adds corners)' : ''}</title></rect>`;
+    }
+    for (let i = 1; i < P.length - 1; i++) {
+      html += `<circle class="whandle corner" data-pt="${i}" cx="${P[i].x}" cy="${P[i].y}" r="4.5">
+          <title>Drag to move this corner · double-click to remove it</title></circle>`;
+    }
+    return `<g class="whandles" data-comp="${c.id}" data-pin="${pin}">${html}</g>`;
+  }
+
+  // Wiring with horizontal / vertical wires works like Wokwi: each click drops a point where
+  // the mouse is, and if that is diagonal to the previous point an L-shaped bend is added.
+  // The bend goes along the axis the mouse first moved on after leaving the previous point
+  // (pending.orient); moving back close to that point lets the user pick again.
+  const ORIENT_RADIUS = 10;
+  const lastPoint = () => pending.pts.length ? pending.pts[pending.pts.length - 1] : pinWorldPos(pending);
+  const snapPt = w => ({ x: snap5(w.x), y: snap5(w.y) });
+
+  // Points leading from `from` to `to` (inclusive) using horizontal / vertical segments.
+  function legTo(from, to, orient) {
+    if (to.x === from.x || to.y === from.y) return [to];
+    return [orient === 'v' ? { x: from.x, y: to.y } : { x: to.x, y: from.y }, to];
+  }
+
+  function trackOrient(w) {
+    const last = lastPoint(), dx = w.x - last.x, dy = w.y - last.y;
+    if (Math.hypot(dx, dy) < ORIENT_RADIUS) pending.orient = null;
+    else if (!pending.orient) pending.orient = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v';
+  }
+
+  function addCornerAt(w) {
+    const last = lastPoint();
+    const pts = legTo(last, snapPt(w), pending.orient || 'h').filter(p => p.x !== last.x || p.y !== last.y);
+    if (!pts.length) return;
+    pending.pts.push(...pts);
+    pending.groups.push(pts.length);   // so Backspace removes one click at a time
+    pending.orient = null;
+  }
+
+  let lastMouse = null;
+  function drawPending() {
+    if (!pending || !lastMouse) return;
+    const a = pinWorldPos(pending), w = lastMouse;
+    pendingWire.setAttribute('d', wireStyle === 'ortho'
+      ? orthoD([a, ...pending.pts, ...legTo(lastPoint(), snapPt(w), pending.orient || 'h')], pending.kind === 'board')
+      : `M${a.x} ${a.y} L${w.x} ${w.y}`);
+  }
+
+  function clearRoute(c, pin) { if (c.route) delete c.route[pin]; }
+
+  function renderWires() {
+    let html = '', handles = '';
     for (const c of comps) {
       const def = PARTS[c.type];
-      for (const p of def.pins) {
+      for (const p of def.pins.concat(autoPower ? [] : powerPins(def))) {
         const g = c.conn[p.name];
         if (g === undefined || g === null) continue;
         const bp = boardPinPos.get(g);
         if (!bp) continue;
-        const d = wirePath(c.x + p.x, c.y + p.y, p.dir, bp);
+        const pts = wireStyle === 'ortho' ? orthoWirePoints(c.x + p.x, c.y + p.y, p.dir, bp, c.route && c.route[p.name], g) : null;
+        const d = pts ? polyD(pts) : wirePath(c.x + p.x, c.y + p.y, p.dir, bp);
         const sel = selection && selection.kind === 'wire' && selection.id === c.id && selection.pin === p.name;
+        if (sel && pts) handles = wireHandles(c, p.name, pts);
         html += `<g class="wire${sel ? ' selected' : ''}" data-comp="${c.id}" data-pin="${p.name}">
             <path d="${d}" class="wire-outline"/>
             <path d="${d}" class="wire-core" stroke="${wireColor(g)}"/>
             <path d="${d}" class="wire-hit"/>
-            <title>${esc(c.id)}.${esc(p.name)} → GPIO${g} (click to select, Delete to remove)</title>
+            <title>${esc(c.id)}.${esc(p.name)} → ${targetName(g)} (click to select, Delete to remove)</title>
           </g>`;
       }
     }
-    wireLayer.innerHTML = html;
+    wireLayer.innerHTML = html + handles;   // handles on top of every wire
   }
 
   function renderStage() {
@@ -698,7 +954,8 @@
       if (!el) continue;
       const ctx = {
         duty: pin => { const g = c.conn[pin]; return g === undefined || g === null ? null : duty[g]; },
-        driven: pin => { const g = c.conn[pin]; return g !== undefined && g !== null && ((enable >>> g) & 1) === 1; }
+        driven: pin => { const g = c.conn[pin]; return g !== undefined && g !== null && ((enable >>> g) & 1) === 1; },
+        powered: isPowered(c)
       };
       PARTS[c.type].update(el, c, ctx);
     }
@@ -715,9 +972,11 @@
 
   // ---- selection & inspector
   function select(sel) {
+    if (simActive()) sel = null;
     selection = sel;
     for (const el of compLayer.children) el.classList.toggle('selected', !!sel && sel.kind === 'comp' && sel.id === el.dataset.id);
-    for (const el of wireLayer.children) el.classList.toggle('selected', !!sel && sel.kind === 'wire' && sel.id === el.dataset.comp && sel.pin === el.dataset.pin);
+    if (wireStyle === 'ortho') renderWires();
+    else for (const el of wireLayer.children) el.classList.toggle('selected', !!sel && sel.kind === 'wire' && sel.id === el.dataset.comp && sel.pin === el.dataset.pin);
     renderInspector();
   }
 
@@ -728,7 +987,7 @@
 
   function renderInspector() {
     const box = $('#inspector');
-    if (!selection) { box.hidden = true; return; }
+    if (!selection || simActive()) { box.hidden = true; return; }
     const c = compById(selection.id);
     if (!c) { box.hidden = true; return; }
     const def = PARTS[c.type];
@@ -737,8 +996,11 @@
       const g = c.conn[selection.pin];
       box.innerHTML = `
         <div class="insp-head"><b>Wire</b><button class="icon" data-act="close" title="Close">✕</button></div>
-        <p class="insp-info">${esc(c.id)}.${esc(selection.pin)} → <b>GPIO${g}</b></p>
-        <div class="insp-actions"><button class="danger" data-act="del-wire">Delete wire</button></div>`;
+        <p class="insp-info">${esc(c.id)}.${esc(selection.pin)} → <b>${targetName(g)}</b></p>
+        <div class="insp-actions">
+          ${wireStyle === 'ortho' && c.route && c.route[selection.pin] ? '<button data-act="reset-route" title="Remove the corners you placed and route this wire automatically">Reset corners</button>' : ''}
+          <button class="danger" data-act="del-wire">Delete wire</button>
+        </div>`;
       return;
     }
     const props = def.props.map(p => {
@@ -750,12 +1012,21 @@
         `<option value="${val}"${String(v) === val ? ' selected' : ''}>${esc(text)}</option>`).join('')}</select></label>`;
     }).join('');
     const pins = def.pins.map(p =>
-      `<label><span>${esc(p.label)}</span><select data-pinsel="${p.name}">${gpioOptions(c.conn[p.name])}</select></label>`).join('');
+      `<label><span>${esc(pinLabelOf(def, c, p))}</span><select data-pinsel="${p.name}">${gpioOptions(c.conn[p.name])}</select></label>`).join('');
+    const power = autoPower ? '' : powerPins(def).map(p => {
+      const cur = POWER_PINS[c.conn[p.name]] || '';
+      const options = [['', '— not connected —'], ['GND', 'GND'], ['3V3', '3V3']].map(([v, t]) =>
+        `<option value="${v}"${cur === v ? ' selected' : ''}>${t}</option>`).join('');
+      return `<label><span>${esc(pinLabelOf(def, c, p))} (power)</span><select data-pwrsel="${p.name}">${options}</select></label>`;
+    }).join('');
+    const warn = isPowered(c) ? '' : `<p class="insp-warn">No power: wire ${def.powerAny ? 'a' : 'the'} supply pin to GND or 3V3.</p>`;
     box.innerHTML = `
       <div class="insp-head"><b>${esc(def.title)}</b><span class="dim">${esc(c.id)}</span><button class="icon" data-act="close" title="Close">✕</button></div>
       ${props}
       <div class="insp-sub">Connections</div>
       ${pins}
+      ${power}
+      ${warn}
       ${c.type === 'sevenseg' ? '<div class="insp-actions"><button data-act="autowire">Auto-wire to GPIO0…7</button></div>' : ''}
       <div class="insp-actions"><button class="danger" data-act="delete">Delete part</button></div>`;
   }
@@ -770,7 +1041,15 @@
       let v = t.value;
       if (t.dataset.bool) v = v === 'true';
       c.props[t.dataset.prop] = v;
+      const dropped = dropMismatchedPower(c);
+      if (dropped.length && !autoPower) toast(`Disconnected ${dropped.map(n => c.id + '.' + n).join(', ')}: it was wired to the other rail`);
+    } else if (t.dataset.pwrsel) {
+      const pin = t.dataset.pwrsel;
+      clearRoute(c, pin);
+      if (t.value === '') delete c.conn[pin];
+      else powerToast(c, attachPower(c, pin, nearestPowerPin(c, pin, t.value)));
     } else if (t.dataset.pinsel) {
+      clearRoute(c, t.dataset.pinsel);
       if (t.value === '') delete c.conn[t.dataset.pinsel];
       else c.conn[t.dataset.pinsel] = +t.value;
     } else return;
@@ -799,6 +1078,12 @@
       case 'close': select(null); break;
       case 'delete': deleteSelection(); break;
       case 'del-wire': deleteSelection(); break;
+      case 'reset-route':
+        clearRoute(c, selection.pin);
+        renderWires();
+        renderInspector();
+        scheduleSave();
+        break;
       case 'autowire':
         ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'dp'].forEach((n, i) => { c.conn[n] = i; });
         afterPartsChanged();
@@ -822,6 +1107,7 @@
     if (!c) return;
     if (selection.kind === 'wire') {
       delete c.conn[selection.pin];
+      clearRoute(c, selection.pin);
       toast(`Disconnected ${c.id}.${selection.pin}`);
     } else {
       comps = comps.filter(x => x !== c);
@@ -865,10 +1151,10 @@
     const spot = findFreeSpot(def);
     const c = {
       id: prefix + n, type, x: spot.x, y: spot.y,
-      props: Object.assign({}, def.defaults), conn: {}
+      props: Object.assign({}, def.defaults), conn: {}, route: {}
     };
     comps.push(c);
-    selection = { kind: 'comp', id: c.id };
+    selection = simActive() ? null : { kind: 'comp', id: c.id };
     afterPartsChanged();
     toast(`Added ${def.title}. Click one of its pins, then a GPIO pin on the board.`);
   }
@@ -880,16 +1166,19 @@
 
   // ---- wiring
   function pinWorldPos(p) {
-    if (p.kind === 'board') return boardPinPos.get(p.gpio);
+    if (p.kind === 'board') return boardPinPos.get(p.key !== undefined ? p.key : p.gpio);
     const c = compById(p.id);
-    const pin = PARTS[c.type].pins.find(q => q.name === p.pin);
+    const pin = findPin(PARTS[c.type], p.pin);
     return { x: c.x + pin.x, y: c.y + pin.y };
   }
 
   function startPending(p, hint) {
     pending = p;
+    pending.pts = [];      // corner points placed so far (horizontal / vertical wires only)
+    pending.groups = [];   // number of points each click added
+    pending.orient = null;
     svg.classList.add('wiring');
-    $('#stageHint').textContent = hint + ' — Esc to cancel';
+    $('#stageHint').textContent = hint + (wireStyle === 'ortho' ? ' · click to place a point (bends automatically), Backspace to undo' : '') + ' — Esc to cancel';
     $('#stageHint').hidden = false;
   }
 
@@ -900,31 +1189,95 @@
     $('#stageHint').hidden = true;
   }
 
-  function connect(id, pin, gpio) {
+  function powerToast(c, dropped) {
+    if (dropped.length) toast(`Disconnected ${dropped.map(n => c.id + '.' + n).join(', ')}: ${c.id} now needs it on the other rail`);
+  }
+
+  // target: GPIO number, or a power pin key such as 'L0'
+  function connect(id, pin, target) {
     const c = compById(id);
-    c.conn[pin] = gpio;
+    const pwr = isPowerPin(PARTS[c.type], pin);
+    // Corners, including the bend into the final pin, are stored from the part towards the board.
+    let corners = [];
+    if (pending && wireStyle === 'ortho') {
+      const end = pending.kind === 'board' ? pinWorldPos({ kind: 'comp', id, pin }) : boardPinPos.get(target);
+      corners = pending.pts.concat(end ? legTo(lastPoint(), end, pending.orient || 'h').slice(0, -1) : []);
+      if (pending.kind === 'board') corners.reverse();
+    }
     cancelPending();
-    selection = { kind: 'comp', id };
+    if (pwr !== (typeof target === 'string')) {
+      toast(pwr ? `${id}.${pin} is a supply pin: connect it to GND or 3V3.` : `${id}.${pin} is a signal pin: connect it to a GPIO pin.`, 'error');
+      return;
+    }
+    let dropped = [];
+    if (pwr) dropped = attachPower(c, pin, target);
+    else c.conn[pin] = target;
+    if (!c.route) c.route = {};
+    if (corners.length) c.route[pin] = corners;
+    else delete c.route[pin];
+    selection = simActive() ? null : { kind: 'comp', id };
     afterPartsChanged();
     let note = '';
-    if (gpio === 20 || gpio === 21) note = ' (note: UART0 pin)';
-    toast(`Connected ${id}.${pin} → GPIO${gpio}${note}`, 'ok');
+    if (target === 20 || target === 21) note = ' (note: UART0 pin)';
+    toast(`Connected ${id}.${pin} → ${targetName(target)}${note}`, 'ok');
+    powerToast(c, dropped);
   }
 
   function onCompPinClick(id, pin) {
-    if (pending && pending.kind === 'board') { connect(id, pin, pending.gpio); return; }
-    startPending({ kind: 'comp', id, pin }, `Wiring ${id}.${pin}: click a GPIO pin on the board`);
+    if (pending && pending.kind === 'board') { connect(id, pin, pending.key !== undefined ? pending.key : pending.gpio); return; }
+    const pwr = isPowerPin(PARTS[compById(id).type], pin);
+    startPending({ kind: 'comp', id, pin }, `Wiring ${id}.${pin}: click a ${pwr ? 'GND or 3V3' : 'GPIO'} pin on the board`);
   }
 
   function onBoardPinClick(label) {
-    if (!/^\d+$/.test(label)) {
-      toast(`${label}: ground/power are connected automatically — connect parts to GPIO pins.`);
+    if (POWER_PINS[label]) {
+      const rail = POWER_PINS[label];
+      if (autoPower) { toast(`${rail}: power is connected automatically. Turn Auto power off to wire it yourself.`); return; }
+      if (rail === '5V') { toast('5V: the parts here run from 3.3 V. Use a 3V3 pin.', 'error'); return; }
+      if (pending && pending.kind === 'comp') { connect(pending.id, pending.pin, label); return; }
+      startPending({ kind: 'board', key: label }, `Wiring ${rail}: click a supply pin on a part`);
       return;
     }
+    if (!/^\d+$/.test(label)) { toast(`${label}: connect parts to GPIO pins.`); return; }
     const gpio = +label;
     if (pending && pending.kind === 'comp') { connect(pending.id, pending.pin, gpio); return; }
     startPending({ kind: 'board', gpio }, `Wiring GPIO${gpio}: click a pin on a part`);
   }
+
+  function setWireStyle(style) {
+    wireStyle = style === 'ortho' ? 'ortho' : 'curve';
+    $('#wireStyle').value = wireStyle;
+  }
+
+  $('#wireStyle').addEventListener('change', e => {
+    cancelPending();
+    setWireStyle(e.target.value);
+    renderWires();
+    renderInspector();
+    scheduleSave();
+    if (wireStyle === 'ortho') toast('Horizontal / vertical wires: while wiring, click to place points; the wire bends along the way you first move the mouse. Backspace undoes a point.');
+  });
+
+  function setAutoPower(on) {
+    autoPower = on;
+    const b = $('#autoPower');
+    b.setAttribute('aria-pressed', String(on));
+    b.querySelector('b').textContent = on ? 'ON' : 'OFF';
+    svg.classList.toggle('manual-power', !on);
+  }
+
+  $('#autoPower').addEventListener('click', () => {
+    cancelPending();
+    setAutoPower(!autoPower);
+    if (selection && selection.kind === 'wire') {
+      const c = compById(selection.id);
+      if (!c || isPowerPin(PARTS[c.type], selection.pin)) selection = null;
+    }
+    afterPartsChanged();
+    const unpowered = comps.filter(c => !isPowered(c)).length;
+    toast(autoPower ? 'Auto power ON: GND / 3V3 are connected automatically.'
+      : `Auto power OFF: wire each part's supply pin to GND or 3V3 on the board${unpowered ? ` (${unpowered} part${unpowered > 1 ? 's' : ''} unpowered)` : ''}.`);
+  });
 
   // ---- pointer interaction
   let drag = null;
@@ -938,6 +1291,13 @@
       if (cpin) { e.preventDefault(); onCompPinClick(cpin.dataset.comp, cpin.dataset.pin); return; }
       const bpin = t.closest('.bpin');
       if (bpin) { e.preventDefault(); onBoardPinClick(bpin.dataset.pin); return; }
+      if (pending && wireStyle === 'ortho') {
+        e.preventDefault();
+        lastMouse = toWorld(e);
+        addCornerAt(lastMouse);
+        drawPending();
+        return;
+      }
       const bb = t.closest('[data-board-btn]');
       if (bb) {
         e.preventDefault();
@@ -945,8 +1305,24 @@
         else if (simState !== 'stopped') { stop(); run(); toast('Reset'); }
         return;
       }
+      const handle = t.closest('.whandle');
+      if (handle) {
+        e.preventDefault();
+        const g = handle.parentNode, c = compById(g.dataset.comp), pin = g.dataset.pin;
+        const P = wirePointsOf(c, pin);
+        if (!P) return;
+        drag = handle.dataset.pt !== undefined
+          ? { type: 'wcorner', c, pin, P, i: +handle.dataset.pt, start: toWorld(e), moved: false }
+          : { type: 'wseg', c, pin, P, i: +handle.dataset.seg, start: toWorld(e), moved: false };
+        svg.setPointerCapture(e.pointerId);
+        return;
+      }
       const wire = t.closest('.wire');
-      if (wire) { select({ kind: 'wire', id: wire.dataset.comp, pin: wire.dataset.pin }); return; }
+      if (wire) {
+        if (simActive()) toast(SETTINGS_LOCKED);
+        select({ kind: 'wire', id: wire.dataset.comp, pin: wire.dataset.pin });
+        return;
+      }
       const compEl = t.closest('.comp');
       if (compEl) {
         e.preventDefault();
@@ -971,16 +1347,49 @@
     svg.classList.add('panning');
   });
 
+  svg.addEventListener('dblclick', e => {
+    const h = e.target.closest('.whandle.corner');
+    if (!h) return;
+    const g = h.parentNode, c = compById(g.dataset.comp), pin = g.dataset.pin;
+    const P = wirePointsOf(c, pin);
+    if (!P) return;
+    P.splice(+h.dataset.pt, 1);
+    // what is left may now be diagonal: let the renderer bend it, then keep those bends
+    setWirePoints(c, pin, P);
+    setWirePoints(c, pin, simplifyPoints(wirePointsOf(c, pin)));
+    renderWires();
+    renderInspector();
+    scheduleSave();
+  });
+
   svg.addEventListener('pointermove', e => {
     if (pending) {
-      const a = pinWorldPos(pending), w = toWorld(e);
-      pendingWire.setAttribute('d', `M${a.x} ${a.y} L${w.x} ${w.y}`);
+      lastMouse = toWorld(e);
+      if (wireStyle === 'ortho') trackOrient(lastMouse);
+      drawPending();
     }
     if (!drag) return;
     if (drag.type === 'pan') {
       view.x = drag.vx + e.clientX - drag.sx;
       view.y = drag.vy + e.clientY - drag.sy;
       applyView();
+    } else if (drag.type === 'wcorner' || drag.type === 'wseg') {
+      const w = toWorld(e);
+      let pts;
+      // snap the distance dragged, so points that sit off the grid (pins) stay in line
+      const dx = snap5(w.x - drag.start.x), dy = snap5(w.y - drag.start.y);
+      if (drag.type === 'wcorner') {
+        const a = drag.P[drag.i];
+        pts = moveCorner(drag.P, drag.i, { x: a.x + dx, y: a.y + dy });
+      } else {
+        const horiz = drag.P[drag.i].y === drag.P[drag.i + 1].y;
+        const delta = horiz ? dy : dx;
+        if (!delta && !drag.moved) return;
+        pts = moveSegment(drag.P, drag.i, delta);
+      }
+      drag.moved = true;
+      setWirePoints(drag.c, drag.pin, pts);
+      renderWires();
     } else if (drag.type === 'comp') {
       if (!drag.moved && Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 4) return;
       drag.moved = true;
@@ -996,8 +1405,16 @@
     if (pointerButton) { pressButton(pointerButton, false); pointerButton = null; }
     if (!drag) return;
     if (drag.type === 'boot') { bootPressed = false; applyInputs(); }
+    if ((drag.type === 'wcorner' || drag.type === 'wseg') && drag.moved) {
+      const P = wirePointsOf(drag.c, drag.pin);
+      if (P) setWirePoints(drag.c, drag.pin, simplifyPoints(P));
+      renderWires();
+      renderInspector();
+      scheduleSave();
+    }
     if (drag.type === 'comp') {
       if (drag.moved) scheduleSave();
+      else if (!drag.toggle && simActive()) toast(SETTINGS_LOCKED);
       else if (drag.toggle) {
         drag.c.props.on = !drag.c.props.on;
         PARTS.switch.update(compEls.get(drag.c.id), drag.c);
@@ -1024,6 +1441,13 @@
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); if (simState === 'running') stop(); run(); return; }
     if (e.target.closest('input, textarea, select')) return;
     if (e.key === 'Escape') { cancelPending(); select(null); return; }
+    if (e.key === 'Backspace' && pending) {
+      e.preventDefault();
+      if (pending.groups.length) pending.pts.splice(-pending.groups.pop());
+      pending.orient = null;
+      drawPending();
+      return;
+    }
     if ((e.key === 'Delete' || e.key === 'Backspace') && selection) { e.preventDefault(); deleteSelection(); return; }
     if (e.repeat) return;
     const k = e.key.toLowerCase();
@@ -1162,8 +1586,15 @@
   $('#memPresets').addEventListener('change', e => { if (e.target.value) { $('#memAddr').value = e.target.value; updateMemory(); } e.target.value = ''; });
 
   // ---- GPIO table
+  function iomuxText(r) {
+    const f = [];
+    if (r & (1 << 9)) f.push('IE');
+    if (r & (1 << 8)) f.push('PU');
+    if (r & (1 << 7)) f.push('PD');
+    return f.join(' ') || '—';
+  }
   function updateGpio() {
-    const en = machine.gpioEnable, out = machine.gpioOut, lv = machine.levels();
+    const en = machine.gpioEnable, out = machine.gpioOut, lv = machine.levels(), floating = machine.floatingPins();
     const users = new Map();
     for (const c of comps) for (const [pin, g] of Object.entries(c.conn)) {
       if (!users.has(g)) users.set(g, []);
@@ -1174,7 +1605,8 @@
       return `<tr><td>GPIO${g}</td><td class="dim">${GPIO_NOTES[g] || ''}</td>
         <td>${isOut ? '<span class="tag out">OUTPUT</span>' : '<span class="tag in">input</span>'}</td>
         <td class="mono">${(out >>> g) & 1}</td>
-        <td><span class="lvl ${level ? 'hi' : 'lo'}">${level ? 'HIGH' : 'LOW'}</span></td>
+        <td class="mono dim">${iomuxText(machine.iomux[g])}</td>
+        <td>${(floating >>> g) & 1 ? '<span class="lvl float" title="Nothing drives or pulls this pin: its level is undefined on real hardware">floating</span>' : `<span class="lvl ${level ? 'hi' : 'lo'}">${level ? 'HIGH' : 'LOW'}</span>`}</td>
         <td class="dim">${(users.get(g) || []).join(', ')}</td></tr>`;
     }).join('');
     $('#gpioRegs').textContent = `GPIO_OUT_REG = ${hex8(out)}   GPIO_ENABLE_REG = ${hex8(en)}   GPIO_IN_REG = ${hex8(lv)}`;
@@ -1240,7 +1672,18 @@
         const g = c.conn && c.conn[p.name];
         if (g !== undefined && g !== null && GPIO_PINS.includes(+g)) conn[p.name] = +g;
       }
-      out.push({ id: String(c.id), type: c.type, x: +c.x || 0, y: +c.y || 0, props: Object.assign({}, def.defaults, c.props), conn });
+      for (const p of powerPins(def)) {
+        const k = c.conn && c.conn[p.name];
+        if (POWER_PINS[k] === 'GND' || POWER_PINS[k] === '3V3') conn[p.name] = k;
+      }
+      const route = {};
+      for (const pin of Object.keys(conn)) {
+        const r = c.route && c.route[pin];
+        if (!Array.isArray(r)) continue;
+        const pts = r.map(q => ({ x: +(q && q.x), y: +(q && q.y) })).filter(q => isFinite(q.x) && isFinite(q.y));
+        if (pts.length) route[pin] = pts;
+      }
+      out.push({ id: String(c.id), type: c.type, x: +c.x || 0, y: +c.y || 0, props: Object.assign({}, def.defaults, c.props), conn, route });
     }
     return out;
   }
@@ -1249,7 +1692,9 @@
     return {
       app: 'rvsim-c3', version: 1,
       code: ta.value,
-      components: comps.map(c => ({ id: c.id, type: c.type, x: c.x, y: c.y, props: c.props, conn: c.conn })),
+      autoPower,
+      wireStyle,
+      components: comps.map(c => ({ id: c.id, type: c.type, x: c.x, y: c.y, props: c.props, conn: c.conn, route: c.route })),
       breakpoints: [...breakpointLines]
     };
   }
@@ -1257,6 +1702,8 @@
   function loadProject(p, opts = {}) {
     if (simState !== 'stopped') stop();
     ta.value = p.code || '';
+    setAutoPower(p.autoPower !== false);
+    setWireStyle(p.wireStyle);
     comps = normalizeComps(p.components);
     breakpointLines = new Set((p.breakpoints || []).filter(n => Number.isInteger(n)));
     selection = null;
@@ -1412,6 +1859,34 @@
     const h = Math.min(r.height - 160, Math.max(120, r.bottom - e.clientY));
     layout.style.setProperty('--bottom', h + 'px');
   });
+
+  // ================================================================ theme
+
+  const THEME_KEY = 'rvsim-c3-theme';
+  function showTheme() {
+    const light = document.documentElement.dataset.theme === 'light';
+    const b = $('#btnTheme'), label = light ? 'Switch to dark theme' : 'Switch to light theme';
+    b.textContent = light ? '☾' : '☀';
+    b.title = label;
+    b.setAttribute('aria-label', label);
+  }
+  $('#btnTheme').addEventListener('click', () => {
+    const t = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+    try { localStorage.setItem(THEME_KEY, t); } catch (_) { /* storage unavailable */ }
+    showTheme();
+  });
+  // Follow the system theme until the user picks one.
+  if (window.matchMedia) {
+    matchMedia('(prefers-color-scheme: light)').addEventListener('change', e => {
+      let saved = null;
+      try { saved = localStorage.getItem(THEME_KEY); } catch (_) { /* ignore */ }
+      if (saved) return;
+      document.documentElement.dataset.theme = e.matches ? 'light' : 'dark';
+      showTheme();
+    });
+  }
+  showTheme();
 
   // ================================================================ init
 

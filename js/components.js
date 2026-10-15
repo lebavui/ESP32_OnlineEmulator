@@ -5,8 +5,13 @@
  *   w, h                 size of the part in world units
  *   pins                 signal pins that can be wired to a GPIO
  *   props                editable properties (shown in the inspector)
- *   render(c)            SVG markup (local coordinates)
- *   update(el, c, ctx)   refresh visuals; ctx.duty(pinName) -> 0..1 or null
+ *   render(c, o)         SVG markup (local coordinates); o.auto = power pins wired automatically
+ *   update(el, c, ctx)   refresh visuals; ctx.duty(pinName) -> 0..1 or null, ctx.powered
+ *   pinLabel(c, p)       optional: pin label that depends on the part's settings
+ *   power                supply pins (GND / 3V3); shown and wired by hand when auto power is off
+ *   powerAny             true if any one supply pin is enough (they are joined inside the part)
+ *   rail(c, pin)         rail ('GND' | '3V3') a supply pin needs with the current settings
+ *   setRail(c, pin, r)   change the settings so that supply pin belongs on rail r
  */
 (function (root) {
   'use strict';
@@ -21,6 +26,10 @@
   };
 
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  // Fixed supply terminal drawn at (x, y): a ground symbol or a "3V3" label.
+  const supply = (vcc, x, y, o) => o && !o.auto ? '' : vcc
+    ? `<text x="${x}" y="${y + 6}" class="tiny" text-anchor="middle">3V3</text>`
+    : `<path d="M${x - 3} ${y} h6 M${x - 2} ${y + 3} h4 M${x - 1} ${y + 6} h2" class="gnd-sym"/>`;
   const opts = list => list.map(v => Array.isArray(v) ? v : [v, v[0].toUpperCase() + v.slice(1)]);
 
   const PARTS = {
@@ -28,7 +37,9 @@
       title: 'LED',
       w: 40, h: 86,
       pins: [{ name: 'A', label: 'Anode (+)', x: 14, y: 86, dir: 'down' }],
-      ground: { x: 26, y: 78, label: 'GND' },
+      power: [{ name: 'K', x: 26, y: 86, dir: 'down' }],
+      rail: c => c.props.activeLow ? '3V3' : 'GND',
+      setRail(c, pin, r) { c.props.activeLow = r === '3V3'; },
       defaults: { color: 'red', activeLow: false },
       props: [
         { key: 'color', label: 'Color', type: 'select', options: opts(Object.keys(LED_COLORS)) },
@@ -39,21 +50,42 @@
           ]
         }
       ],
-      render(c) {
+      pinLabel(c, p) {
+        const anode = (p.name === 'A') !== !!c.props.activeLow;
+        return anode ? 'Anode (+)' : 'Cathode (−)';
+      },
+      render(c, o) {
         const col = LED_COLORS[c.props.color] || LED_COLORS.red;
+        // Signal pin A is the anode when active-high, the cathode when active-low.
+        // Like a real LED: the anode leg has a kink (the long leg), the cathode side of the rim is flat.
+        const anodeLeft = !c.props.activeLow;
+        const rightEnd = o && !o.auto ? 86 : 78;
+        const leg = (x, end, anode) => {
+          const k = x < 20 ? -3 : 3;
+          return anode
+            ? `<path d="M${x} 50 V58 l${k} 4 l${-k} 4 V${end}" class="leg"/>`
+            : `<path d="M${x} 50 V${end}" class="leg"/>`;
+        };
+        const mark = (x, anode) =>
+          `<text x="${x}" y="68" class="pol ${anode ? 'pol-a' : 'pol-k'}" text-anchor="middle">${anode ? '+' : '−'}</text>`;
+        const rimX = anodeLeft ? 4 : 7;   // rim cut flush with the lens on the cathode side
         return `
           <circle class="glow" cx="20" cy="22" r="24" fill="${col}" opacity="0" filter="url(#glowBlur)"/>
-          <path d="M14 46 V86" class="leg"/>
-          <path d="M26 46 V70 l0 8" class="leg"/>
+          <path d="M14 46 V50 M26 46 V50" class="leg"/>
+          ${leg(14, 86, anodeLeft)}
+          ${leg(26, rightEnd, !anodeLeft)}
+          ${mark(5, anodeLeft)}
+          ${mark(35, !anodeLeft)}
           <path d="M7 48 V22 A13 13 0 0 1 33 22 V48 Z" fill="${col}" class="lens" opacity="0.35"/>
           <path d="M7 48 V22 A13 13 0 0 1 33 22 V48 Z" fill="url(#lensShine)" pointer-events="none"/>
-          <rect x="4" y="44" width="32" height="6" rx="1.5" fill="${col}" opacity="0.55"/>
-          <rect x="4" y="44" width="32" height="6" rx="1.5" fill="#000" opacity="0.25"/>
-          <path d="M23 78 h6 M24 81 h4 M25 84 h2" class="gnd-sym"/>`;
+          <rect x="${rimX}" y="44" width="29" height="6" rx="1.5" fill="${col}" opacity="0.55"/>
+          <rect x="${rimX}" y="44" width="29" height="6" rx="1.5" fill="#000" opacity="0.25"/>
+          <path d="M${anodeLeft ? 33 : 7} 43 V51" class="flat"/>
+          ${o && !o.auto ? '' : supply(c.props.activeLow, 26, 78)}`;
       },
       update(el, c, ctx) {
         let d = ctx.duty('A');
-        if (d === null) d = 0;
+        if (d === null || !ctx.powered) d = 0;
         else if (c.props.activeLow) d = ctx.driven('A') ? 1 - d : 0;
         const lens = el.querySelector('.lens');
         const glow = el.querySelector('.glow');
@@ -66,25 +98,26 @@
       title: 'Push button',
       w: 60, h: 74,
       pins: [{ name: '1', label: 'Signal', x: 18, y: 74, dir: 'down' }],
-      ground: { x: 42, y: 66 },
+      power: [{ name: 'P', label: 'Contact', x: 42, y: 74, dir: 'down' }],
+      rail: c => c.props.mode === 'pulldown' ? '3V3' : 'GND',
+      setRail(c, pin, r) { c.props.mode = r === '3V3' ? 'pulldown' : 'pullup'; },
       defaults: { color: 'red', mode: 'pullup', key: '' },
       props: [
         { key: 'color', label: 'Cap color', type: 'select', options: opts(Object.keys(CAP_COLORS)) },
         {
           key: 'mode', label: 'Wiring', type: 'select', options: [
-            ['pullup', 'To GND, pull-up (pressed = 0)'],
-            ['pulldown', 'To 3V3, pull-down (pressed = 1)']
+            ['pullup', 'To GND: pressed = 0 (needs pull-up)'],
+            ['pulldown', 'To 3V3: pressed = 1 (needs pull-down)']
           ]
         },
         { key: 'key', label: 'Keyboard key', type: 'key' }
       ],
-      render(c) {
+      render(c, o) {
         const col = CAP_COLORS[c.props.color] || CAP_COLORS.red;
-        const vcc = c.props.mode === 'pulldown';
         return `
           <path d="M18 56 V74" class="leg"/>
-          <path d="M42 56 V66" class="leg"/>
-          ${vcc ? '<text x="42" y="72" class="tiny" text-anchor="middle">3V3</text>' : '<path d="M39 66 h6 M40 69 h4 M41 72 h2" class="gnd-sym"/>'}
+          <path d="M42 56 V${o && !o.auto ? 74 : 66}" class="leg"/>
+          ${supply(c.props.mode === 'pulldown', 42, 66, o)}
           <rect x="4" y="4" width="52" height="52" rx="4" fill="#3b3f47" stroke="#22252b" stroke-width="1.5"/>
           <circle cx="11" cy="11" r="3" fill="#1d1f24"/><circle cx="49" cy="11" r="3" fill="#1d1f24"/>
           <circle cx="11" cy="49" r="3" fill="#1d1f24"/><circle cx="49" cy="49" r="3" fill="#1d1f24"/>
@@ -106,14 +139,36 @@
       title: 'Slide switch',
       w: 70, h: 56,
       pins: [{ name: '1', label: 'Signal', x: 35, y: 56, dir: 'down' }],
-      defaults: { on: false },
-      props: [],
-      render() {
+      power: [
+        { name: 'L', label: 'OFF contact', x: 14, y: 56, dir: 'down' },
+        { name: 'R', label: 'ON contact', x: 56, y: 56, dir: 'down' }
+      ],
+      rail: (c, pin) => (pin === 'R') === (c.props.onLevel !== 'low') ? '3V3' : 'GND',
+      setRail(c, pin, r) { c.props.onLevel = (pin === 'R') === (r === '3V3') ? 'high' : 'low'; },
+      defaults: { on: false, onLevel: 'high' },
+      props: [
+        {
+          key: 'onLevel', label: 'Wiring', type: 'select', options: [
+            ['high', 'ON → 3V3, OFF → GND (on = 1)'],
+            ['low', 'ON → GND, OFF → 3V3 (on = 0)']
+          ]
+        }
+      ],
+      // Logic level the switch drives onto its signal pin, or null if the selected
+      // contact isn't wired to a supply (only possible when auto power is off).
+      level(c, auto) {
+        const side = c.props.on ? 'R' : 'L';
+        if (!auto && (c.conn[side] === undefined || c.conn[side] === null)) return null;
+        return this.rail(c, side) === '3V3' ? 1 : 0;
+      },
+      render(c, o) {
+        const onHigh = c.props.onLevel !== 'low';
+        const legEnd = o && !o.auto ? 56 : 44;
         return `
           <path d="M35 34 V56" class="leg"/>
-          <path d="M14 34 V44" class="leg"/><path d="M56 34 V44" class="leg"/>
-          <path d="M11 44 h6 M12 47 h4 M13 50 h2" class="gnd-sym"/>
-          <text x="56" y="52" class="tiny" text-anchor="middle">3V3</text>
+          <path d="M14 34 V${legEnd}" class="leg"/><path d="M56 34 V${legEnd}" class="leg"/>
+          ${supply(!onHigh, 14, 44, o)}
+          ${supply(onHigh, 56, 44, o)}
           <g data-toggle="1" class="clickable">
             <rect x="2" y="6" width="66" height="28" rx="3" fill="#2f6fd6" stroke="#1d4f9e" stroke-width="1.5"/>
             <rect x="12" y="13" width="46" height="14" rx="2" fill="#1a2c4f"/>
@@ -140,6 +195,13 @@
         { name: 'c', label: 'Segment c', x: 58, y: 132, dir: 'down' },
         { name: 'dp', label: 'Decimal point', x: 72, y: 132, dir: 'down' }
       ],
+      power: [
+        { name: 'COM', label: 'Common (top)', x: 42, y: 0, dir: 'up' },
+        { name: 'COM2', label: 'Common (bottom)', x: 42, y: 132, dir: 'down' }
+      ],
+      powerAny: true,
+      rail: c => c.props.common === 'anode' ? '3V3' : 'GND',
+      setRail(c, pin, r) { c.props.common = r === '3V3' ? 'anode' : 'cathode'; },
       defaults: { common: 'cathode', color: 'red' },
       props: [
         {
@@ -150,7 +212,7 @@
         },
         { key: 'color', label: 'Color', type: 'select', options: opts(['red', 'green', 'blue', 'yellow', 'orange', 'white']) }
       ],
-      render(c) {
+      render(c, o) {
         const col = LED_COLORS[c.props.color] || LED_COLORS.red;
         const x0 = 24, y0 = 26, W = 34, H = 76, T = 7, L = H / 2;
         const hseg = (x, y) => `${x + 2},${y} ${x + T / 2 + 2},${y - T / 2} ${x + W - T / 2 - 2},${y - T / 2} ${x + W - 2},${y} ${x + W - T / 2 - 2},${y + T / 2} ${x + T / 2 + 2},${y + T / 2}`;
@@ -169,6 +231,8 @@
           <rect x="6" y="18" width="72" height="96" rx="2" fill="#16171a"/>
           ${pinLabels}
           <text x="42" y="16" class="tiny light" text-anchor="middle">${c.props.common === 'anode' ? '+' : '−'}</text>
+          ${o && !o.auto ? '' : `<text x="42" y="-3" class="tiny" text-anchor="middle">${c.props.common === 'anode' ? '3V3' : 'GND'}</text>`}
+          ${supply(c.props.common === 'anode', 42, 133, o)}
           <g transform="translate(9 0) ${sk}" fill="${col}">
             ${Object.entries(segs).map(([k, pts]) => `<polygon class="seg seg-${k}" points="${pts}" opacity="0.1"/>`).join('')}
           </g>
@@ -178,7 +242,7 @@
         const anode = c.props.common === 'anode';
         for (const p of this.pins) {
           let d = ctx.duty(p.name);
-          if (d === null) d = 0;
+          if (d === null || !ctx.powered) d = 0;
           else if (anode) d = ctx.driven(p.name) ? 1 - d : 0;
           const s = el.querySelector('.seg-' + p.name);
           s.setAttribute('opacity', (0.1 + 0.9 * d).toFixed(3));

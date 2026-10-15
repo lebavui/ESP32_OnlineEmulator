@@ -20,17 +20,31 @@
   const PERIPH_LO = 0x60000000, PERIPH_HI = 0x600D0FFF;
   const UART0 = 0x60000000;
   const GPIO = 0x60004000;
+  const IO_MUX = 0x60009000;          // IO_MUX_GPIOn_REG = IO_MUX + 4 + 4 * n
   const SYSTIMER = 0x60023000;
   const USB_SERIAL = 0x60043000;
 
   const hex = v => '0x' + (v >>> 0).toString(16).padStart(8, '0');
+
+  // IO_MUX_GPIOn_REG bits that the simulator models
+  const FUN_WPD = 1 << 7, FUN_WPU = 1 << 8, FUN_IE = 1 << 9;
+  // Reset values, from the "Reset" column of the ESP32-C3 IO MUX pin table:
+  // FUN_DRV = 2 (0x800) everywhere, plus IE (0x200) and pull-up (0x100) or pull-down (0x080).
+  const IOMUX_RESET = [
+    0x800, 0x800, 0xA00, 0xA00, 0xA00, 0xA00, 0xA00, 0xA00,   // GPIO0..7  (0, 1: XTAL_32K pins, input off)
+    0xA00, 0xB00, 0xA00, 0x800, 0xB00, 0xB00, 0xB00, 0xB00,   // GPIO8..15 (9: BOOT strapping, pulled up)
+    0xB00, 0xB00, 0x800, 0x800, 0xB00, 0x800                  // GPIO16..21 (18, 19: USB; 20: U0RXD; 21: U0TXD)
+  ];
 
   class ESP32C3 {
     constructor() {
       this.sram = new Uint8Array(SRAM_SIZE);
       this.dv = new DataView(this.sram.buffer);
       this.core = new RV32Core(this);
-      this.extLevel = 0;            // levels driven onto pins by external parts
+      // What the parts outside the chip do to each pin (bit masks):
+      // force = pins connected to a level (value) by a pressed button / a switch,
+      // pullUp / pullDown = resistors on the board (e.g. the BOOT button's pull-up on GPIO9).
+      this.ext = { force: 0, value: 0, pullUp: 0, pullDown: 0 };
       this.tx = [];                 // bytes written to the serial port
       this.reset();
     }
@@ -40,6 +54,10 @@
       this.core.reset(IRAM_BASE);
       this.gpioOut = 0;
       this.gpioEnable = 0;
+      this.iomux = Uint32Array.from(IOMUX_RESET);
+      this.updateIomuxMasks();
+      this.floatReads = 0;          // pins read through GPIO_IN_REG while floating
+      this.ieOffReads = 0;          // pins read through GPIO_IN_REG with FUN_IE = 0
       this.periph = new Map();
       this.uartRx = [];
       this.tx.length = 0;
@@ -145,7 +163,7 @@
         case GPIO + 0x08: case GPIO + 0x0C: return 0;
         case GPIO + 0x20: return this.gpioEnable;
         case GPIO + 0x24: case GPIO + 0x28: return 0;
-        case GPIO + 0x3C: return this.levels();
+        case GPIO + 0x3C: return this.readInputs();
         case UART0 + 0x00: return this.uartRx.length ? this.uartRx.shift() : 0;
         case UART0 + 0x1C: return Math.min(this.uartRx.length, 0x3ff); // RXFIFO_CNT, TXFIFO_CNT = 0
         case SYSTIMER + 0x04: case SYSTIMER + 0x08: return 1 << 29; // VALUE_VALID
@@ -154,7 +172,9 @@
         case SYSTIMER + 0x48: return this.st1Hi;
         case SYSTIMER + 0x4C: return this.st1Lo;
         case USB_SERIAL + 0x04: return 0x2;  // SERIAL_IN_EP_DATA_FREE
-        default: return this.periph.get(addr) | 0;
+        default:
+          if (addr >= IO_MUX + 4 && addr < IO_MUX + 4 + 4 * GPIO_COUNT) return this.iomux[(addr - IO_MUX - 4) >> 2];
+          return this.periph.get(addr) | 0;
       }
     }
 
@@ -183,13 +203,47 @@
           }
           return;
       }
+      if (addr >= IO_MUX + 4 && addr < IO_MUX + 4 + 4 * GPIO_COUNT) {
+        this.iomux[(addr - IO_MUX - 4) >> 2] = v & 0xffff;
+        this.updateIomuxMasks();
+        this.pinsChanged();
+        return;
+      }
       this.periph.set(addr, v >>> 0);
     }
 
     // ------------------------------------------------------------ pins
 
+    updateIomuxMasks() {
+      let ie = 0, wpu = 0, wpd = 0;
+      for (let i = 0; i < GPIO_COUNT; i++) {
+        const r = this.iomux[i];
+        if (r & FUN_IE) ie |= 1 << i;
+        if (r & FUN_WPU) wpu |= 1 << i;
+        if (r & FUN_WPD) wpd |= 1 << i;
+      }
+      this.ieMask = ie; this.wpuMask = wpu; this.wpdMask = wpd;
+    }
+
+    // Electrical level of every pin. Priority: the chip's own output driver, then a part that
+    // connects the pin to GND / 3V3, then pull-up / pull-down resistors (internal or on the
+    // board). A floating pin (none of these) is shown as low.
     levels() {
-      return ((this.gpioOut & this.gpioEnable) | (this.extLevel & ~this.gpioEnable)) & GPIO_MASK;
+      const en = this.gpioEnable, f = this.ext.force & ~en;
+      const up = (this.ext.pullUp | this.wpuMask) & ~en & ~f;
+      return ((this.gpioOut & en) | (this.ext.value & f) | up) & GPIO_MASK;
+    }
+
+    /** Pins that nothing drives or pulls (their level is undefined on real hardware). */
+    floatingPins() {
+      return ~(this.gpioEnable | this.ext.force | this.ext.pullUp | this.ext.pullDown | this.wpuMask | this.wpdMask) & GPIO_MASK;
+    }
+
+    // GPIO_IN_REG: only pins with FUN_IE set are seen by the input buffer.
+    readInputs() {
+      this.floatReads |= this.floatingPins() & this.ieMask;
+      this.ieOffReads |= ~this.ieMask & GPIO_MASK;
+      return this.levels() & this.ieMask;
     }
 
     pinsChanged() {
@@ -222,8 +276,16 @@
       return out;
     }
 
-    setExternal(level) {
-      this.extLevel = level & GPIO_MASK;
+    /**
+     * Set what external parts do to the pins: { force, value, pullUp, pullDown } bit masks.
+     * A plain number forces every pin to that level (handy in tests).
+     */
+    setExternal(ext) {
+      if (typeof ext === 'number') ext = { force: GPIO_MASK, value: ext };
+      this.ext = {
+        force: (ext.force | 0) & GPIO_MASK, value: (ext.value | 0) & GPIO_MASK,
+        pullUp: (ext.pullUp | 0) & GPIO_MASK, pullDown: (ext.pullDown | 0) & GPIO_MASK
+      };
       this.pinsChanged();
     }
 
@@ -354,7 +416,7 @@
   }
 
   Object.assign(ESP32C3, {
-    SRAM_SIZE, DRAM_BASE, IRAM_BASE, STACK_TOP, CPU_HZ, GPIO_COUNT,
+    SRAM_SIZE, DRAM_BASE, IRAM_BASE, STACK_TOP, CPU_HZ, GPIO_COUNT, IO_MUX, IOMUX_RESET, FUN_IE, FUN_WPU, FUN_WPD,
     UART0, GPIO, SYSTIMER, USB_SERIAL
   });
 

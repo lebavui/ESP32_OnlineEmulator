@@ -166,10 +166,10 @@ const CPU_HZ = ESP32C3.CPU_HZ;
 
 { // button example
   const m = exampleMachine('button');
-  m.setExternal(1 << 4);           // released (pulled up)
+  m.setExternal({});               // released: floating, the program enables the pull-up
   m.run(100000, null, Infinity);
   const off = (m.levels() >> 2) & 1;
-  m.setExternal(0);                // pressed
+  m.setExternal({ force: 1 << 4, value: 0 });   // pressed: pin connected to GND
   m.run(200000, null, Infinity);
   const on = (m.levels() >> 2) & 1;
   check('button example', off === 0 && on === 1, [off, on]);
@@ -188,9 +188,37 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   const m = exampleMachine('counter');
   let t = 0;
   const adv = ms => { t += ms / 1000 * CPU_HZ; m.run(t, null, Infinity); };
-  m.setExternal(1 << 10); adv(10);
-  for (let i = 0; i < 3; i++) { m.setExternal(0); adv(60); m.setExternal(1 << 10); adv(60); }
+  const pressed = { force: 1 << 10, value: 0 }, released = {};
+  m.setExternal(released); adv(10);
+  for (let i = 0; i < 3; i++) { m.setExternal(pressed); adv(60); m.setExternal(released); adv(60); }
   check('counter example', (m.levels() & 0xff) === 0x4f, hex(m.levels() & 0xff));
+}
+
+{ // IO_MUX: reset values, FUN_IE gating, internal pulls, floating detection
+  const run = src => { const m = new ESP32C3(); m.load(RVAsm.assemble(src)); m.run(1000, null, Infinity); return m; };
+  const rd = 'li t0, 0x60004000\n lw a0, 0x3C(t0)\n';
+  const ioReg = g => 0x60009004 + 4 * g;
+  let m = run('li t0, 0x60009028\n lw a0, 0(t0)\n j .');      // IO_MUX_GPIO9_REG
+  check('io_mux reset GPIO9 (IE + WPU)', m.core.x[10] === 0xB00, hex(m.core.x[10]));
+  m = run('li t0, 0x60009004\n lw a0, 0(t0)\n j .');          // IO_MUX_GPIO0_REG
+  check('io_mux reset GPIO0 (input off)', m.core.x[10] === 0x800, hex(m.core.x[10]));
+  // GPIO4: IE on, no pull at reset -> floating; forced high it reads 1
+  m = new ESP32C3(); m.load(RVAsm.assemble(rd + 'j .')); m.setExternal({ force: 1 << 4, value: 1 << 4 });
+  m.run(1000, null, Infinity);
+  check('GPIO_IN sees a driven input', ((m.core.x[10] >> 4) & 1) === 1, hex(m.core.x[10]));
+  // FUN_IE cleared -> reads 0 even though the pin is high
+  m = new ESP32C3();
+  m.load(RVAsm.assemble(`li t1, ${ioReg(4)}\n li t2, 0x800\n sw t2, 0(t1)\n` + rd + 'j .'));
+  m.setExternal({ force: 1 << 4, value: 1 << 4 });
+  m.run(1000, null, Infinity);
+  check('FUN_IE = 0 reads 0', ((m.core.x[10] >> 4) & 1) === 0 && ((m.ieOffReads >> 4) & 1) === 1, hex(m.core.x[10]));
+  // floating GPIO4 is reported; with FUN_WPU it reads 1 and is not floating
+  m = run(rd + 'j .');
+  check('floating read reported', ((m.floatReads >> 4) & 1) === 1 && ((m.core.x[10] >> 4) & 1) === 0, hex(m.floatReads));
+  m = run(`li t1, ${ioReg(4)}\n li t2, 0xB00\n sw t2, 0(t1)\n` + rd + 'j .');
+  check('FUN_WPU pulls up', ((m.core.x[10] >> 4) & 1) === 1 && ((m.floatReads >> 4) & 1) === 0, hex(m.core.x[10]));
+  m = run(`li t1, ${ioReg(4)}\n li t2, 0xA80\n sw t2, 0(t1)\n` + rd + 'j .');
+  check('FUN_WPD pulls down', ((m.core.x[10] >> 4) & 1) === 0 && ((m.floatReads >> 4) & 1) === 0, hex(m.core.x[10]));
 }
 
 { // uart echo

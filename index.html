@@ -7,6 +7,15 @@
   <meta name="description" content="Write RISC-V assembly, run it on a simulated ESP32-C3 and wire up LEDs, buttons and 7-segment displays in your browser.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2318202e'/%3E%3Crect x='8' y='8' width='16' height='16' rx='2' fill='%2330d158'/%3E%3Cpath d='M4 12h4M4 20h4M24 12h4M24 20h4M12 4v4M20 4v4M12 24v4M20 24v4' stroke='%23c9a74a' stroke-width='2'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
+  <script>
+    // Apply the saved (or system) theme before the page paints.
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('rvsim-c3-theme'); } catch (_) { /* storage unavailable */ }
+      if (t !== 'light' && t !== 'dark') t = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
 </head>
 <body data-sim="stopped">
   <header class="topbar">
@@ -32,6 +41,7 @@
         </div>
       </div>
       <button type="button" id="btnShare" title="Copy a link containing the whole project">Share</button>
+      <button type="button" class="icon" id="btnTheme" title="Switch to light theme" aria-label="Switch to light theme">☀</button>
     </nav>
 
     <div class="tb-group sim-controls">
@@ -83,6 +93,11 @@
           <button type="button" data-add="button"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1.5" y="1.5" width="13" height="13" rx="2" fill="none" stroke="currentColor"/><circle cx="8" cy="8" r="4" fill="#e5383b"/></svg>Button</button>
           <button type="button" data-add="switch"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1" y="4" width="14" height="8" rx="1.5" fill="#2f6fd6"/><rect x="2.5" y="5.5" width="5" height="5" fill="#fff"/></svg>Switch</button>
           <button type="button" data-add="sevenseg"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M5 2h6M4 3v4.5M12 3v4.5M5 8h6M4 9v4.5M12 9v4.5M5 14h6" stroke="#ff3b30" stroke-width="1.6"/></svg>7-Segment</button>
+          <button type="button" class="toggle" id="autoPower" aria-pressed="true" title="ON: parts' GND / 3V3 pins are connected automatically. OFF: wire each part's supply pin to a GND or 3V3 pin on the board yourself.">Auto power: <b>ON</b></button>
+          <select id="wireStyle" title="How wires are drawn. Horizontal / vertical: while wiring, click to place points; diagonal steps bend automatically.">
+            <option value="curve">Wires: curved</option>
+            <option value="ortho">Wires: horizontal / vertical</option>
+          </select>
           <span class="spacer"></span>
           <button type="button" class="icon" id="zoomOut" title="Zoom out">−</button>
           <button type="button" class="icon" id="zoomIn" title="Zoom in">+</button>
@@ -142,7 +157,7 @@
           <section id="tab-gpio" hidden>
             <div class="panel-head mono dim" id="gpioRegs"></div>
             <table class="grid">
-              <thead><tr><th>Pin</th><th>Note</th><th>Direction</th><th>OUT bit</th><th>Level</th><th>Connected to</th></tr></thead>
+              <thead><tr><th>Pin</th><th>Note</th><th>Direction</th><th>OUT bit</th><th title="IO_MUX_GPIOn_REG: IE = input enable, PU / PD = internal pull-up / pull-down">IO_MUX</th><th>Level</th><th>Connected to</th></tr></thead>
               <tbody id="gpioBody"></tbody>
             </table>
           </section>
@@ -159,7 +174,7 @@
             <h3>Quick start</h3>
             <ol>
               <li>Write RISC-V (RV32IM) assembly in the editor, or pick one of the <b>Examples</b>.</li>
-              <li>Add parts with the toolbar above the board. Wire a part by clicking one of its pins and then a <b>GPIO pin</b> on the board (or choose the GPIO in the part's settings panel). Ground / 3V3 are connected automatically.</li>
+              <li>Add parts with the toolbar above the board. Wire a part by clicking one of its pins and then a <b>GPIO pin</b> on the board (or choose the GPIO in the part's settings panel). Ground / 3V3 are connected automatically while <b>Auto power</b> is ON. The <b>Wires</b> menu switches between curved wires and horizontal / vertical wires; with the latter, click while wiring to place points. If a point is diagonal to the previous one, the wire bends at a right angle, first along the direction you moved the mouse (move back near the previous point to choose again). Backspace removes the last point. To edit a wire afterwards, click it: drag a round handle to move a corner, drag a bar handle to move a segment (this adds corners where the segment meets a pin), and double-click a corner to remove it. Turn Auto power OFF to wire each part's supply pin to a GND or 3V3 pin yourself: a part without power doesn't work, and the rail you choose sets its wiring mode (for example, an LED's fixed leg on 3V3 makes it active-low).</li>
               <li>Press <b>▶ Run</b> (F5). Use <b>Step</b> (F10), breakpoints (click a line number) and <code>ebreak</code> to debug. Choose a slow speed such as <i>10 Hz (trace)</i> to watch each instruction execute.</li>
             </ol>
 
@@ -171,7 +186,7 @@
               <tr><td class="mono">0x3FCDFFF0</td><td>initial stack pointer <code>sp</code> (stack grows down); <code>gp</code> = start of .data</td></tr>
               <tr><td class="mono">0x60000000</td><td>UART0</td></tr>
               <tr><td class="mono">0x60004000</td><td>GPIO</td></tr>
-              <tr><td class="mono">0x60009000</td><td>IO_MUX (accepted, not modelled)</td></tr>
+              <tr><td class="mono">0x60009000</td><td>IO_MUX (<code>FUN_IE</code>, <code>FUN_WPU</code>, <code>FUN_WPD</code> are modelled)</td></tr>
               <tr><td class="mono">0x60023000</td><td>SYSTIMER (16 MHz counter)</td></tr>
               <tr><td class="mono">0x60043000</td><td>USB Serial/JTAG (EP1 writes go to the serial monitor)</td></tr>
             </table>
@@ -188,7 +203,15 @@
               <tr><td class="mono">0x28</td><td>GPIO_ENABLE_W1TC_REG</td><td>Write 1s to make pins inputs</td></tr>
               <tr><td class="mono">0x3C</td><td>GPIO_IN_REG</td><td>Current level of every pin (read-only)</td></tr>
             </table>
-            <p>Inputs are always readable in the simulator. On real hardware also set <code>FUN_IE</code> (bit 9) and optionally <code>FUN_WPU</code> (bit 8, pull-up) in <code>IO_MUX_GPIOn_REG</code> = 0x60009004 + 4·n.</p>
+            <h3>IO_MUX (base 0x60009000)</h3>
+            <p><code>IO_MUX_GPIOn_REG</code> = 0x60009004 + 4·n. As on the real chip:</p>
+            <table class="grid">
+              <tr><th>Bit</th><th>Name</th><th>Effect</th></tr>
+              <tr><td class="mono">9</td><td>FUN_IE</td><td>Input enable. When 0, the pin always reads 0 in <code>GPIO_IN_REG</code>.</td></tr>
+              <tr><td class="mono">8</td><td>FUN_WPU</td><td>Internal pull-up</td></tr>
+              <tr><td class="mono">7</td><td>FUN_WPD</td><td>Internal pull-down</td></tr>
+            </table>
+            <p>A button only connects its pin to GND (or 3V3) while pressed. When released the pin is <b>floating</b> unless a pull resistor is enabled, so set <code>FUN_IE | FUN_WPU</code> for a button to GND (or <code>FUN_IE | FUN_WPD</code> for a button to 3V3). Reading a floating pin or a pin with <code>FUN_IE</code> = 0 prints a warning in the serial monitor. Reset values follow the chip: e.g. GPIO2–8 and 10 have IE = 1 and no pull, GPIO9 has IE = 1 and a pull-up, GPIO0/1 have IE = 0. Other fields (<code>MCU_SEL</code>, <code>FUN_DRV</code>, …) read back what was written; every pin always works as a GPIO.</p>
 
             <h3>SYSTIMER (base 0x60023000)</h3>
             <table class="grid">
