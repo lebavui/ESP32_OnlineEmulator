@@ -22,9 +22,10 @@ npx serve .          # or: python -m http.server
 - **ESP32-C3 model:**
   - 384 KB SRAM, mapped twice (code at `0x40380000`, data at `0x3FCA0000`).
   - GPIO registers (`OUT`, `W1TS/W1TC`, `ENABLE`, `IN`).
-  - IO_MUX input enable and internal pull-up / pull-down (`FUN_IE`, `FUN_WPU`, `FUN_WPD`) with the chip's reset values. Buttons leave their pin floating when released, and reading a floating pin, or one with `FUN_IE` = 0, prints a warning.
+  - IO_MUX function select, input enable and internal pull-up / pull-down (`MCU_SEL`, `FUN_IE`, `FUN_WPU`, `FUN_WPD`) with the reset values from the datasheet's pin table. Pins whose IO MUX function 0 isn't GPIO (GPIO4–7 JTAG, GPIO12–17 SPI flash, GPIO20/21 UART0) need `MCU_SEL` = 1 before `GPIO_OUT` reaches them, and writing `GPIO_OUT` for such a pin prints a warning. GPIO21 idles high as U0TXD, and GPIO19 has the USB D+ pull-up. Buttons leave their pin floating when released, and reading a floating pin, or one with `FUN_IE` = 0, prints a warning.
   - SYSTIMER (16 MHz) for accurate delays.
   - UART0 FIFO and USB-Serial-JTAG output, shown in the serial monitor.
+  - Simulator errors, warnings (e.g. floating inputs, outputs not routed by IO_MUX) and exit notices go to a separate **Messages** panel, with the simulated time and a link to the source line.
   - Simulator-only `ecall` services for printing, sleeping and exiting.
 - **Parts:**
   - LED (colors, active-high or active-low)
@@ -60,7 +61,9 @@ npx serve .          # or: python -m http.server
 
 ## Simplifications compared with real hardware
 
-- IO_MUX models only `FUN_IE`, `FUN_WPU` and `FUN_WPD`. Other fields such as `MCU_SEL` and `FUN_DRV` read back what was written, and every pin always works as a GPIO (the GPIO matrix isn't modelled). A floating pin reads 0 instead of a random value.
+- IO_MUX models only `MCU_SEL`, `FUN_IE`, `FUN_WPU` and `FUN_WPD`; other fields such as `FUN_DRV` read back what was written. The GPIO matrix isn't modelled: a pin in a GPIO function is always a plain GPIO, and non-GPIO functions only stop GPIO output (U0TXD drives an idle high, the others drive nothing). A floating pin reads 0 instead of a random value.
+- The USB Serial/JTAG PHY isn't modelled: GPIO18/19 work as GPIOs without disabling USB first, and the D+ pull-up on GPIO19 is always on.
+- The CPU runs at 160 MHz from the start (the real chip boots at XTAL/2 = 20 MHz until the bootloader switches to the PLL).
 - Every instruction takes one cycle. There are no interrupts, caches or flash/ROM functions.
 - The C (compressed) extension isn't generated or decoded.
 - Misaligned loads and stores, and accesses to unmapped addresses, stop the simulation with an error.

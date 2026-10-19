@@ -512,10 +512,26 @@ button.stop { color: var(--danger-text); }
   background: var(--serial-bg);
   color: var(--serial-text);
 }
-#serialOut .sys { color: var(--muted); font-style: italic; margin: 2px 0; }
-#serialOut .sys.err { color: var(--danger); font-style: normal; }
 #serialForm { display: flex; gap: 6px; padding: 6px; border-top: 1px solid var(--border); }
 #serialForm input { flex: 1; min-width: 0; font-family: var(--mono); }
+
+.tabs .count {
+  display: inline-block; min-width: 16px; margin-left: 6px; padding: 0 5px; border-radius: 8px;
+  background: var(--danger); color: #fff; font-size: 11px; line-height: 16px; text-align: center;
+}
+.messages { display: flex; flex-direction: column; overflow: hidden !important; }
+.msg-list { flex: 1; overflow: auto; font-size: 12.5px; }
+.msg-empty { padding: 12px; color: var(--muted); }
+.msg { display: flex; gap: 8px; align-items: baseline; padding: 5px 12px; border-bottom: 1px solid var(--border-soft); }
+.msg .mi { flex: none; width: 14px; text-align: center; }
+.msg .mt { flex: none; color: var(--muted); font-size: 11.5px; }
+.msg .mx { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.msg.error .mi, .msg.error .mx { color: var(--danger-text); }
+.msg.warn .mi { color: var(--orange-text); }
+.msg.info .mi { color: var(--accent-2); }
+.msg .ml { flex: none; padding: 1px 6px; font-size: 11.5px; }
+.msg-foot { display: flex; gap: 6px; align-items: center; padding: 6px; border-top: 1px solid var(--border); }
+.msg-foot .dim { padding-left: 6px; }
 
 .panel-head { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--border); flex-wrap: wrap; position: sticky; top: 0; background: var(--panel); }
 .regs { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0 14px; padding: 6px 10px; }

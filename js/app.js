@@ -10,7 +10,10 @@
   const CPU_HZ = ESP32C3.CPU_HZ;
 
   const GPIO_PINS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 18, 19, 20, 21];
-  const GPIO_NOTES = { 2: 'strapping', 8: 'strapping', 9: 'BOOT button', 18: 'USB D-', 19: 'USB D+', 20: 'UART0 RX', 21: 'UART0 TX' };
+  const GPIO_NOTES = {
+    2: 'strapping', 4: 'JTAG MTMS', 5: 'JTAG MTDI', 6: 'JTAG MTCK', 7: 'JTAG MTDO', 8: 'strapping', 9: 'BOOT button',
+    18: 'USB D-', 19: 'USB D+ (pull-up)', 20: 'UART0 RX', 21: 'UART0 TX'
+  };
   const WIRE_COLORS = ['#2ecc71', '#3498db', '#e67e22', '#b07cff', '#f1c40f', '#1abc9c', '#ff5d73', '#ff8fd1', '#00c2e0', '#9ccc65', '#ffa94d'];
   const STORE_KEY = 'rvsim-c3-project-v1';
 
@@ -288,8 +291,10 @@
     }
     loadedSource = ta.value;
     ioWarned = 0;
+    outWarned = 0;
     applyInputs();
     clearSerial();
+    clearMessages();
     prevRegs = null;
     return true;
   }
@@ -355,12 +360,13 @@
   function handleStop(r) {
     if (r === 'halt') {
       simState = 'halted';
-      appendSystem(`■ ${machine.haltMessage}`);
+      addMessage('info', machine.haltMessage);
       setCurrentLine(0);
     } else if (r === 'error') {
       simState = 'halted';
       const line = program && program.addrToLine.get(machine.error.pc);
-      appendSystem(`✖ ${machine.error.message}${line ? ` (line ${line})` : ''}`, true);
+      addMessage('error', machine.error.message, line);
+      $('[data-tab="messages"]').click();               // the run stopped: show why
       toast(machine.error.message, 'error');
       setCurrentLine(line || 0, true);
     } else if (r === 'breakpoint') {
@@ -499,19 +505,34 @@
     return mask;
   }
   function checkInputWarnings() {
+    checkOutputWarnings();
     const pins = inputPartPins();
     const ieOff = machine.ieOffReads & pins & ~ioWarned;
     const floating = machine.floatReads & pins & ~ioWarned & ~ieOff;
     if (!ieOff && !floating) return;
     const list = m => GPIO_PINS.filter(g => (m >>> g) & 1);
     for (const g of list(ieOff)) {
-      appendSystem(`⚠ GPIO${g} was read with FUN_IE = 0 (input disabled), so it always reads 0. Set bit 9 of IO_MUX_GPIO${g}_REG (0x${(0x60009004 + 4 * g).toString(16).toUpperCase()}).`, true);
+      addMessage('warn', `GPIO${g} was read with FUN_IE = 0 (input disabled), so it always reads 0. Set bit 9 of IO_MUX_GPIO${g}_REG (0x${(0x60009004 + 4 * g).toString(16).toUpperCase()}).`);
     }
     for (const g of list(floating)) {
-      appendSystem(`⚠ GPIO${g} was read while floating (nothing connected to GND / 3V3 and no pull resistor): real hardware reads random values. Enable FUN_WPU (bit 8, pull-up) or FUN_WPD (bit 7, pull-down) in IO_MUX_GPIO${g}_REG.`, true);
+      addMessage('warn', `GPIO${g} was read while floating (nothing connected to GND / 3V3 and no pull resistor): real hardware reads random values. Enable FUN_WPU (bit 8, pull-up) or FUN_WPD (bit 7, pull-down) in IO_MUX_GPIO${g}_REG.`);
     }
-    toast(`GPIO${list(ieOff | floating).join(', GPIO')}: input not set up correctly, see the serial monitor`, 'error');
+    toast(`GPIO${list(ieOff | floating).join(', GPIO')}: input not set up correctly, see Messages`, 'error');
     ioWarned |= ieOff | floating;
+  }
+
+  // Warn (once per run and pin) when the program writes GPIO_OUT for an output pin whose
+  // IO MUX function is not GPIO: the write never reaches the pin.
+  let outWarned = 0;
+  function checkOutputWarnings() {
+    const pins = machine.noFnWrites & ~outWarned;
+    if (!pins) return;
+    const list = GPIO_PINS.filter(g => (pins >>> g) & 1);
+    for (const g of list) {
+      addMessage('warn', `GPIO${g} is an output, but its IO MUX function is ${machine.pinFunction(g) || 'reserved'}, so GPIO_OUT does not reach the pin. Set MCU_SEL (bits 14:12) of IO_MUX_GPIO${g}_REG (0x${(0x60009004 + 4 * g).toString(16).toUpperCase()}) to 1 (function GPIO${g}).`);
+    }
+    toast(`GPIO${list.join(', GPIO')}: output not routed to the pin, see Messages`, 'error');
+    outWarned |= pins;
   }
 
   function pressButton(c, down) {
@@ -947,7 +968,7 @@
 
   function updateStage() {
     const duty = machine.sampleDuty();
-    const enable = machine.gpioEnable;
+    const enable = machine.drivenPins();
     const levels = machine.levels();
     for (const c of comps) {
       const el = compEls.get(c.id);
@@ -1491,17 +1512,6 @@
     if (activeTab !== 'serial') $('[data-tab="serial"]').classList.add('badge');
   }
 
-  function appendSystem(msg, isErr) {
-    flushSerial();
-    const stick = serialAtBottom();
-    const s = document.createElement('div');
-    s.className = 'sys' + (isErr ? ' err' : '');
-    s.textContent = msg;
-    serialOut.appendChild(s);
-    serialTail = null;
-    if (stick) serialOut.scrollTop = serialOut.scrollHeight;
-  }
-
   function clearSerial() {
     serialOut.textContent = '';
     serialTail = null;
@@ -1520,6 +1530,48 @@
     if (simState !== 'running') toast('Queued in UART0 RX FIFO — run the program to receive it');
   });
   $('#serialClear').addEventListener('click', clearSerial);
+
+  // ---- messages: simulator errors, warnings and notices (kept apart from the program's serial output)
+  const msgList = $('#msgList'), msgCount = $('#msgCount');
+  const MSG_ICONS = { error: '✖', warn: '⚠', info: 'ℹ' };
+  let msgTotals = { error: 0, warn: 0, info: 0 }, msgUnseen = 0;
+
+  function addMessage(level, text, line) {
+    if (!msgTotals.error && !msgTotals.warn && !msgTotals.info) msgList.textContent = '';
+    msgTotals[level]++;
+    const stick = msgList.scrollHeight - msgList.scrollTop - msgList.clientHeight < 30;
+    const row = document.createElement('div');
+    row.className = 'msg ' + level;
+    row.innerHTML = `<span class="mi">${MSG_ICONS[level]}</span><span class="mt mono">${machine.timeSeconds.toFixed(3)} s</span>
+      <span class="mx">${esc(text)}</span>${line ? `<button type="button" class="ml mono" data-line="${line}">line ${line}</button>` : ''}`;
+    msgList.appendChild(row);
+    if (stick) msgList.scrollTop = msgList.scrollHeight;
+    if (activeTab !== 'messages' && level !== 'info') { msgUnseen++; msgCount.textContent = msgUnseen; msgCount.hidden = false; }
+    updateMsgSummary();
+  }
+
+  function updateMsgSummary() {
+    const parts = [];
+    if (msgTotals.error) parts.push(`${msgTotals.error} error${msgTotals.error > 1 ? 's' : ''}`);
+    if (msgTotals.warn) parts.push(`${msgTotals.warn} warning${msgTotals.warn > 1 ? 's' : ''}`);
+    if (msgTotals.info) parts.push(`${msgTotals.info} notice${msgTotals.info > 1 ? 's' : ''}`);
+    $('#msgSummary').textContent = parts.join(' · ');
+  }
+
+  function seenMessages() { msgUnseen = 0; msgCount.hidden = true; }
+
+  function clearMessages() {
+    msgTotals = { error: 0, warn: 0, info: 0 };
+    msgList.innerHTML = '<div class="msg-empty">No messages. Errors and warnings from the simulator appear here.</div>';
+    seenMessages();
+    updateMsgSummary();
+  }
+
+  msgList.addEventListener('click', e => {
+    const b = e.target.closest('[data-line]');
+    if (b) gotoLine(+b.dataset.line);
+  });
+  $('#msgClear').addEventListener('click', clearMessages);
 
   // ---- registers
   const regsEl = $('#regs');
@@ -1586,12 +1638,12 @@
   $('#memPresets').addEventListener('change', e => { if (e.target.value) { $('#memAddr').value = e.target.value; updateMemory(); } e.target.value = ''; });
 
   // ---- GPIO table
-  function iomuxText(r) {
-    const f = [];
+  function iomuxText(r, g) {
+    const f = [machine.pinFunction(g) || `F${(r >>> 12) & 7}?`];
     if (r & (1 << 9)) f.push('IE');
     if (r & (1 << 8)) f.push('PU');
     if (r & (1 << 7)) f.push('PD');
-    return f.join(' ') || '—';
+    return f.join(' ');
   }
   function updateGpio() {
     const en = machine.gpioEnable, out = machine.gpioOut, lv = machine.levels(), floating = machine.floatingPins();
@@ -1601,11 +1653,13 @@
       users.get(g).push(`${c.id}.${pin}`);
     }
     $('#gpioBody').innerHTML = GPIO_PINS.map(g => {
-      const isOut = (en >>> g) & 1, level = (lv >>> g) & 1;
+      const isOut = (en >>> g) & 1, level = (lv >>> g) & 1, routed = (machine.gpioFnMask >>> g) & 1;
+      const dir = !routed ? `<span class="tag in" title="IO MUX function ${esc(machine.pinFunction(g) || 'reserved')} is selected: GPIO_OUT / GPIO_ENABLE do not reach this pin">${isOut ? 'OUTPUT (not routed)' : 'not GPIO'}</span>`
+        : isOut ? '<span class="tag out">OUTPUT</span>' : '<span class="tag in">input</span>';
       return `<tr><td>GPIO${g}</td><td class="dim">${GPIO_NOTES[g] || ''}</td>
-        <td>${isOut ? '<span class="tag out">OUTPUT</span>' : '<span class="tag in">input</span>'}</td>
+        <td>${dir}</td>
         <td class="mono">${(out >>> g) & 1}</td>
-        <td class="mono dim">${iomuxText(machine.iomux[g])}</td>
+        <td class="mono dim">${iomuxText(machine.iomux[g], g)}</td>
         <td>${(floating >>> g) & 1 ? '<span class="lvl float" title="Nothing drives or pulls this pin: its level is undefined on real hardware">floating</span>' : `<span class="lvl ${level ? 'hi' : 'lo'}">${level ? 'HIGH' : 'LOW'}</span>`}</td>
         <td class="dim">${(users.get(g) || []).join(', ')}</td></tr>`;
     }).join('');
@@ -1657,6 +1711,7 @@
       case 'gpio': updateGpio(); break;
       case 'listing': updateListing(); break;
       case 'serial': $('[data-tab="serial"]').classList.remove('badge'); break;
+      case 'messages': seenMessages(); break;
     }
   }
 
@@ -1720,6 +1775,7 @@
     if (!res) { toast('Project loaded — it has assembly errors', 'error'); $('#listBody').innerHTML = ''; }
     requestAnimationFrame(fitView);
     clearSerial();
+    clearMessages();
     if (!opts.noSave) scheduleSave();
     updateAll(true);
   }

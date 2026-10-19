@@ -23,6 +23,27 @@ delay_ms:
         ret
 `;
 
+  // GPIO4..7 power up in IO MUX function 0 (JTAG: MTMS, MTDI, MTCK, MTDO), where GPIO_OUT
+  // does not reach the pin. Select function 1 (GPIOn) for pins first..last.
+  const GPIO_FUNC = (first, last) => `
+        # GPIO${first}..${last} start in IO MUX function 0 (JTAG). Select function 1
+        # (GPIOn) in MCU_SEL (bits 14:12) of IO_MUX_GPIOn_REG.
+        li      t0, IO_MUX_BASE + 4 + 4 * ${first}  # IO_MUX_GPIO${first}_REG
+        addi    t1, t0, 4 * ${last - first + 1}
+        li      t3, ~MCU_SEL_MASK
+        li      t4, MCU_SEL_GPIO
+1:      lw      t2, 0(t0)
+        and     t2, t2, t3
+        or      t2, t2, t4
+        sw      t2, 0(t0)
+        addi    t0, t0, 4
+        bltu    t0, t1, 1b
+`;
+  const MCU_SEL_EQU = `        .equ IO_MUX_BASE,       0x60009000
+        .equ MCU_SEL_MASK,      7 << 12  # IO MUX function select
+        .equ MCU_SEL_GPIO,      1 << 12  # function 1 = GPIOn
+`;
+
   const EXAMPLES = [
     {
       id: 'blink',
@@ -119,7 +140,7 @@ pressed:
         .equ GPIO_OUT,          0x04
         .equ GPIO_ENABLE_W1TS,  0x24
         .equ SYSTIMER_BASE,     0x60023000
-        .equ SEG_MASK,          0xFF
+${MCU_SEL_EQU}        .equ SEG_MASK,          0xFF
 
         .data
 digits:                         # bit0 = a ... bit6 = g
@@ -131,7 +152,7 @@ main:
         li      s0, GPIO_BASE
         li      t0, SEG_MASK
         sw      t0, GPIO_ENABLE_W1TS(s0)    # GPIO0..7 = outputs
-        la      s1, digits
+${GPIO_FUNC(4, 7)}        la      s1, digits
         li      s2, 0                       # counter
 
 loop:
@@ -171,8 +192,7 @@ ${DELAY_MS}`,
         .equ GPIO_OUT,          0x04
         .equ GPIO_ENABLE_W1TS,  0x24
         .equ GPIO_IN,           0x3C
-        .equ IO_MUX_BASE,       0x60009000
-        .equ FUN_WPU,           1 << 8   # weak pull-up
+${MCU_SEL_EQU}        .equ FUN_WPU,           1 << 8   # weak pull-up
         .equ FUN_IE,            1 << 9   # input enable
         .equ SYSTIMER_BASE,     0x60023000
         .equ SEG_MASK,          0xFF
@@ -186,7 +206,7 @@ main:
         li      s0, GPIO_BASE
         li      t0, SEG_MASK
         sw      t0, GPIO_ENABLE_W1TS(s0)
-        la      s1, digits
+${GPIO_FUNC(4, 7)}        la      s1, digits
         # IO_MUX_GPIOn_REG: input enable + pull-up (the button connects the pin to GND)
         li      t0, IO_MUX_BASE + 4 + 4 * BTN_PIN
         li      t1, FUN_IE | FUN_WPU
@@ -245,7 +265,7 @@ ${DELAY_MS}`,
         .equ GPIO_OUT,          0x04
         .equ GPIO_ENABLE_W1TS,  0x24
         .equ SYSTIMER_BASE,     0x60023000
-        .equ RED,               1 << 3
+${MCU_SEL_EQU}        .equ RED,               1 << 3
         .equ YELLOW,            1 << 4
         .equ GREEN,             1 << 5
         .equ ALL,               RED | YELLOW | GREEN
@@ -264,7 +284,7 @@ main:
         li      s0, GPIO_BASE
         li      t0, ALL
         sw      t0, GPIO_ENABLE_W1TS(s0)
-
+${GPIO_FUNC(4, 5)}
 restart:
         la      s1, states              # s1 = current table entry
 next:

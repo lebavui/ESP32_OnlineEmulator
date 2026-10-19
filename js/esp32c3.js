@@ -28,13 +28,27 @@
 
   // IO_MUX_GPIOn_REG bits that the simulator models
   const FUN_WPD = 1 << 7, FUN_WPU = 1 << 8, FUN_IE = 1 << 9;
-  // Reset values, from the "Reset" column of the ESP32-C3 IO MUX pin table:
+  const MCU_SEL_SHIFT = 12;           // MCU_SEL = bits 14:12, selects IO MUX function 0..2
+  // Reset values, from the "After Reset" column of datasheet Table 2-1 (Pin Overview):
   // FUN_DRV = 2 (0x800) everywhere, plus IE (0x200) and pull-up (0x100) or pull-down (0x080).
+  // MCU_SEL = 0 (function 0) everywhere.
   const IOMUX_RESET = [
-    0x800, 0x800, 0xA00, 0xA00, 0xA00, 0xA00, 0xA00, 0xA00,   // GPIO0..7  (0, 1: XTAL_32K pins, input off)
+    0x800, 0x800, 0xA00, 0xA00, 0xA00, 0xA00, 0xB00, 0xA00,   // GPIO0..7  (0, 1: XTAL_32K, input off; 6: MTCK, IE + WPU while EFUSE_DIS_PAD_JTAG = 0)
     0xA00, 0xB00, 0xA00, 0x800, 0xB00, 0xB00, 0xB00, 0xB00,   // GPIO8..15 (9: BOOT strapping, pulled up)
-    0xB00, 0xB00, 0x800, 0x800, 0xB00, 0x800                  // GPIO16..21 (18, 19: USB; 20: U0RXD; 21: U0TXD)
+    0xB00, 0xB00, 0x800, 0x800, 0xB00, 0x900                  // GPIO16..21 (18, 19: USB; 20: U0RXD; 21: U0TXD, WPU)
   ];
+  // IO MUX functions F0, F1, F2 of each pin (datasheet Table 2-3). F1 is always GPIOn.
+  const IOMUX_FUNCS = [
+    ['GPIO0', 'GPIO0'], ['GPIO1', 'GPIO1'], ['GPIO2', 'GPIO2', 'FSPIQ'], ['GPIO3', 'GPIO3'],
+    ['MTMS', 'GPIO4', 'FSPIHD'], ['MTDI', 'GPIO5', 'FSPIWP'], ['MTCK', 'GPIO6', 'FSPICLK'], ['MTDO', 'GPIO7', 'FSPID'],
+    ['GPIO8', 'GPIO8'], ['GPIO9', 'GPIO9'], ['GPIO10', 'GPIO10', 'FSPICS0'], ['GPIO11', 'GPIO11'],
+    ['SPIHD', 'GPIO12'], ['SPIWP', 'GPIO13'], ['SPICS0', 'GPIO14'], ['SPICLK', 'GPIO15'],
+    ['SPID', 'GPIO16'], ['SPIQ', 'GPIO17'], ['GPIO18', 'GPIO18'], ['GPIO19', 'GPIO19'],
+    ['U0RXD', 'GPIO20'], ['U0TXD', 'GPIO21']
+  ];
+  const U0TXD_PIN = 21;
+  // GPIO19 (USB_D+) is pulled up by the USB Serial/JTAG PHY after reset ("USB_PU" in Table 2-1).
+  const USB_PULLUP = 1 << 19;
 
   class ESP32C3 {
     constructor() {
@@ -58,6 +72,7 @@
       this.updateIomuxMasks();
       this.floatReads = 0;          // pins read through GPIO_IN_REG while floating
       this.ieOffReads = 0;          // pins read through GPIO_IN_REG with FUN_IE = 0
+      this.noFnWrites = 0;          // output pins written through GPIO_OUT while not in the GPIO function
       this.periph = new Map();
       this.uartRx = [];
       this.tx.length = 0;
@@ -180,9 +195,9 @@
 
     periphWrite(addr, v) {
       switch (addr) {
-        case GPIO + 0x04: this.gpioOut = v & GPIO_MASK; this.pinsChanged(); return;
-        case GPIO + 0x08: this.gpioOut = (this.gpioOut | v) & GPIO_MASK; this.pinsChanged(); return;
-        case GPIO + 0x0C: this.gpioOut = this.gpioOut & ~v & GPIO_MASK; this.pinsChanged(); return;
+        case GPIO + 0x04: this.gpioOut = v & GPIO_MASK; this.noteOutWrite(GPIO_MASK); this.pinsChanged(); return;
+        case GPIO + 0x08: this.gpioOut = (this.gpioOut | v) & GPIO_MASK; this.noteOutWrite(v); this.pinsChanged(); return;
+        case GPIO + 0x0C: this.gpioOut = this.gpioOut & ~v & GPIO_MASK; this.noteOutWrite(v); this.pinsChanged(); return;
         case GPIO + 0x20: this.gpioEnable = v & GPIO_MASK; this.pinsChanged(); return;
         case GPIO + 0x24: this.gpioEnable = (this.gpioEnable | v) & GPIO_MASK; this.pinsChanged(); return;
         case GPIO + 0x28: this.gpioEnable = this.gpioEnable & ~v & GPIO_MASK; this.pinsChanged(); return;
@@ -223,20 +238,44 @@
         if (r & FUN_WPD) wpd |= 1 << i;
       }
       this.ieMask = ie; this.wpuMask = wpu; this.wpdMask = wpd;
+      // Pins whose selected function is GPIOn: only these are driven by GPIO_OUT / GPIO_ENABLE.
+      let fn = 0;
+      for (let i = 0; i < GPIO_COUNT; i++) {
+        const name = IOMUX_FUNCS[i][(this.iomux[i] >>> MCU_SEL_SHIFT) & 7];
+        if (name && name.startsWith('GPIO')) fn |= 1 << i;
+      }
+      this.gpioFnMask = fn;
+      // With function U0TXD selected, UART0 drives its idle level (high) onto GPIO21.
+      this.uartTxMask = ((this.iomux[U0TXD_PIN] >>> MCU_SEL_SHIFT) & 7) === 0 ? 1 << U0TXD_PIN : 0;
+    }
+
+    /** Pins the chip itself drives (GPIO outputs in the GPIO function, plus U0TXD). */
+    drivenPins() {
+      return (this.gpioEnable & this.gpioFnMask) | this.uartTxMask;
+    }
+
+    /** Function name currently selected on a pin by IO_MUX MCU_SEL (undefined if reserved). */
+    pinFunction(g) {
+      return IOMUX_FUNCS[g][(this.iomux[g] >>> MCU_SEL_SHIFT) & 7];
+    }
+
+    // Record writes to GPIO_OUT that cannot reach a pin because its function is not GPIO.
+    noteOutWrite(mask) {
+      this.noFnWrites |= mask & this.gpioEnable & ~this.gpioFnMask & GPIO_MASK;
     }
 
     // Electrical level of every pin. Priority: the chip's own output driver, then a part that
     // connects the pin to GND / 3V3, then pull-up / pull-down resistors (internal or on the
     // board). A floating pin (none of these) is shown as low.
     levels() {
-      const en = this.gpioEnable, f = this.ext.force & ~en;
-      const up = (this.ext.pullUp | this.wpuMask) & ~en & ~f;
-      return ((this.gpioOut & en) | (this.ext.value & f) | up) & GPIO_MASK;
+      const en = this.drivenPins(), f = this.ext.force & ~en;
+      const up = (this.ext.pullUp | this.wpuMask | USB_PULLUP) & ~en & ~f;
+      return ((this.gpioOut & en) | this.uartTxMask | (this.ext.value & f) | up) & GPIO_MASK;
     }
 
     /** Pins that nothing drives or pulls (their level is undefined on real hardware). */
     floatingPins() {
-      return ~(this.gpioEnable | this.ext.force | this.ext.pullUp | this.ext.pullDown | this.wpuMask | this.wpdMask) & GPIO_MASK;
+      return ~(this.drivenPins() | this.ext.force | this.ext.pullUp | this.ext.pullDown | this.wpuMask | this.wpdMask | USB_PULLUP) & GPIO_MASK;
     }
 
     // GPIO_IN_REG: only pins with FUN_IE set are seen by the input buffer.
@@ -416,7 +455,7 @@
   }
 
   Object.assign(ESP32C3, {
-    SRAM_SIZE, DRAM_BASE, IRAM_BASE, STACK_TOP, CPU_HZ, GPIO_COUNT, IO_MUX, IOMUX_RESET, FUN_IE, FUN_WPU, FUN_WPD,
+    SRAM_SIZE, DRAM_BASE, IRAM_BASE, STACK_TOP, CPU_HZ, GPIO_COUNT, IO_MUX, IOMUX_RESET, IOMUX_FUNCS, FUN_IE, FUN_WPU, FUN_WPD,
     UART0, GPIO, SYSTIMER, USB_SERIAL
   });
 

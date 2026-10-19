@@ -114,6 +114,7 @@
       <div class="bottom">
         <div class="tabs" role="tablist">
           <button type="button" data-tab="serial" class="active">Serial Monitor</button>
+          <button type="button" data-tab="messages">Messages<span class="count" id="msgCount" hidden></span></button>
           <button type="button" data-tab="regs">Registers</button>
           <button type="button" data-tab="mem">Memory</button>
           <button type="button" data-tab="gpio">GPIO</button>
@@ -134,6 +135,15 @@
               <button type="submit">Send</button>
               <button type="button" id="serialClear">Clear</button>
             </form>
+          </section>
+
+          <section id="tab-messages" class="messages" hidden>
+            <div class="msg-list" id="msgList"><div class="msg-empty">No messages. Errors and warnings from the simulator appear here.</div></div>
+            <div class="msg-foot">
+              <span class="dim" id="msgSummary"></span>
+              <span class="spacer"></span>
+              <button type="button" id="msgClear">Clear</button>
+            </div>
           </section>
 
           <section id="tab-regs" hidden>
@@ -157,7 +167,7 @@
           <section id="tab-gpio" hidden>
             <div class="panel-head mono dim" id="gpioRegs"></div>
             <table class="grid">
-              <thead><tr><th>Pin</th><th>Note</th><th>Direction</th><th>OUT bit</th><th title="IO_MUX_GPIOn_REG: IE = input enable, PU / PD = internal pull-up / pull-down">IO_MUX</th><th>Level</th><th>Connected to</th></tr></thead>
+              <thead><tr><th>Pin</th><th>Note</th><th>Direction</th><th>OUT bit</th><th title="IO_MUX_GPIOn_REG: selected function (MCU_SEL), IE = input enable, PU / PD = internal pull-up / pull-down">IO_MUX</th><th>Level</th><th>Connected to</th></tr></thead>
               <tbody id="gpioBody"></tbody>
             </table>
           </section>
@@ -186,7 +196,7 @@
               <tr><td class="mono">0x3FCDFFF0</td><td>initial stack pointer <code>sp</code> (stack grows down); <code>gp</code> = start of .data</td></tr>
               <tr><td class="mono">0x60000000</td><td>UART0</td></tr>
               <tr><td class="mono">0x60004000</td><td>GPIO</td></tr>
-              <tr><td class="mono">0x60009000</td><td>IO_MUX (<code>FUN_IE</code>, <code>FUN_WPU</code>, <code>FUN_WPD</code> are modelled)</td></tr>
+              <tr><td class="mono">0x60009000</td><td>IO_MUX (<code>MCU_SEL</code>, <code>FUN_IE</code>, <code>FUN_WPU</code>, <code>FUN_WPD</code> are modelled)</td></tr>
               <tr><td class="mono">0x60023000</td><td>SYSTIMER (16 MHz counter)</td></tr>
               <tr><td class="mono">0x60043000</td><td>USB Serial/JTAG (EP1 writes go to the serial monitor)</td></tr>
             </table>
@@ -207,11 +217,21 @@
             <p><code>IO_MUX_GPIOn_REG</code> = 0x60009004 + 4·n. As on the real chip:</p>
             <table class="grid">
               <tr><th>Bit</th><th>Name</th><th>Effect</th></tr>
+              <tr><td class="mono">14:12</td><td>MCU_SEL</td><td>IO MUX function (0, 1 or 2). Function 1 is always GPIO<i>n</i>; only pins in a GPIO function are driven by <code>GPIO_OUT</code> / <code>GPIO_ENABLE</code>.</td></tr>
               <tr><td class="mono">9</td><td>FUN_IE</td><td>Input enable. When 0, the pin always reads 0 in <code>GPIO_IN_REG</code>.</td></tr>
               <tr><td class="mono">8</td><td>FUN_WPU</td><td>Internal pull-up</td></tr>
               <tr><td class="mono">7</td><td>FUN_WPD</td><td>Internal pull-down</td></tr>
             </table>
-            <p>A button only connects its pin to GND (or 3V3) while pressed. When released the pin is <b>floating</b> unless a pull resistor is enabled, so set <code>FUN_IE | FUN_WPU</code> for a button to GND (or <code>FUN_IE | FUN_WPD</code> for a button to 3V3). Reading a floating pin or a pin with <code>FUN_IE</code> = 0 prints a warning in the serial monitor. Reset values follow the chip: e.g. GPIO2–8 and 10 have IE = 1 and no pull, GPIO9 has IE = 1 and a pull-up, GPIO0/1 have IE = 0. Other fields (<code>MCU_SEL</code>, <code>FUN_DRV</code>, …) read back what was written; every pin always works as a GPIO.</p>
+            <p>A button only connects its pin to GND (or 3V3) while pressed. When released the pin is <b>floating</b> unless a pull resistor is enabled, so set <code>FUN_IE | FUN_WPU</code> for a button to GND (or <code>FUN_IE | FUN_WPD</code> for a button to 3V3). Reading a floating pin or a pin with <code>FUN_IE</code> = 0 prints a warning in the serial monitor. Reset values follow the "After Reset" column of the datasheet's pin table: GPIO2–5, 7, 8 and 10 have IE = 1 and no pull; GPIO6 (MTCK), GPIO9 and GPIO12–17, 20 have IE = 1 and a pull-up; GPIO21 (U0TXD) has a pull-up only; GPIO0/1, 11, 18, 19 have IE = 0. GPIO19 (USB D+) is also pulled up by the USB PHY.</p>
+            <p>After reset <code>MCU_SEL</code> = 0 on every pin, and function 0 is not GPIO on all of them:</p>
+            <table class="grid">
+              <tr><th>Pins</th><th>Function 0</th><th>To use as GPIO output</th></tr>
+              <tr><td>GPIO0–3, 8–11, 18, 19</td><td>GPIO<i>n</i></td><td>works directly</td></tr>
+              <tr><td>GPIO4–7</td><td>JTAG (MTMS, MTDI, MTCK, MTDO)</td><td rowspan="3">set <code>MCU_SEL</code> = 1</td></tr>
+              <tr><td>GPIO12–17</td><td>SPI flash (SPIHD … SPIQ)</td></tr>
+              <tr><td>GPIO20, 21</td><td>U0RXD, U0TXD (GPIO21 is driven high by the idle UART)</td></tr>
+            </table>
+            <p>Writing <code>GPIO_OUT</code> for an output pin that is not in a GPIO function prints a warning. Inputs (<code>GPIO_IN_REG</code>) work in any function as long as <code>FUN_IE</code> = 1. Other fields (<code>FUN_DRV</code>, …) read back what was written.</p>
 
             <h3>SYSTIMER (base 0x60023000)</h3>
             <table class="grid">

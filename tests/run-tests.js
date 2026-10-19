@@ -221,6 +221,38 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   check('FUN_WPD pulls down', ((m.core.x[10] >> 4) & 1) === 0 && ((m.floatReads >> 4) & 1) === 0, hex(m.core.x[10]));
 }
 
+{ // IO_MUX MCU_SEL and pin states after reset (datasheet Tables 2-1, 2-3)
+  const fresh = () => { const m = new ESP32C3(); m.load(RVAsm.assemble('j .')); return m; };
+  let m = fresh();
+  check('io_mux reset GPIO6 (MTCK: IE + WPU)', m.iomux[6] === 0xB00, hex(m.iomux[6]));
+  check('io_mux reset GPIO21 (U0TXD: WPU)', m.iomux[21] === 0x900, hex(m.iomux[21]));
+  check('U0TXD idles high', ((m.levels() >> 21) & 1) === 1 && ((m.floatingPins() >> 21) & 1) === 0, hex(m.levels()));
+  check('USB D+ pulled up', ((m.levels() >> 19) & 1) === 1 && ((m.floatingPins() >> 19) & 1) === 0, hex(m.levels()));
+  // GPIO2 (function 0 = GPIO2) is driven directly; GPIO4 (function 0 = MTMS) needs MCU_SEL = 1
+  const out = 'li t0, 0x60004000\n li t1, 0x14\n sw t1, 0x24(t0)\n sw t1, 0x08(t0)\n';
+  m = new ESP32C3(); m.load(RVAsm.assemble(out + 'j .')); m.run(1000, null, Infinity);
+  check('GPIO out blocked in function 0 (MTMS)', ((m.levels() >> 2) & 1) === 1 && ((m.levels() >> 4) & 1) === 0 && m.noFnWrites === 0x10,
+    hex(m.levels()) + ' ' + hex(m.noFnWrites));
+  m = new ESP32C3();
+  m.load(RVAsm.assemble('li t2, 0x60009014\n li t3, 0x1A00\n sw t3, 0(t2)\n' + out + 'j .'));
+  m.run(1000, null, Infinity);
+  check('GPIO out with MCU_SEL = 1', ((m.levels() >> 4) & 1) === 1 && m.noFnWrites === 0, hex(m.levels()));
+  // GPIO21 in function 1 is a plain GPIO: no longer driven by the UART
+  m = new ESP32C3();
+  m.load(RVAsm.assemble('li t2, 0x60009058\n li t3, 0x1800\n sw t3, 0(t2)\n j .'));
+  m.run(1000, null, Infinity);
+  check('GPIO21 as GPIO floats', ((m.floatingPins() >> 21) & 1) === 1, hex(m.floatingPins()));
+}
+
+{ // traffic light: green first, then yellow (GPIO4, 5 need MCU_SEL = 1)
+  const m = exampleMachine('traffic');
+  m.run(CPU_HZ * 1, null, Infinity);
+  const a = (m.levels() >> 3) & 7;
+  m.run(CPU_HZ * 3.5, null, Infinity);
+  const b = (m.levels() >> 3) & 7;
+  check('traffic example', a === 4 && b === 2 && m.noFnWrites === 0, [a, b]);
+}
+
 { // uart echo
   const m = exampleMachine('uart');
   m.run(2e6, null, Infinity);
