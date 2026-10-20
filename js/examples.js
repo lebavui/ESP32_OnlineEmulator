@@ -311,7 +311,7 @@ ${DELAY_MS}`,
     {
       id: 'uart',
       name: 'UART hello + echo',
-      description: 'Print a greeting through the UART0 FIFO register and echo what you type in the serial monitor.',
+      description: 'Print a greeting through the UART0 FIFO register and echo what you type in the serial monitor. (On a SuperMini, UART0 is on GPIO20/21, not on USB: use the USB-Serial-JTAG example there.)',
       code: `# ============================================================
 #  UART0: print a greeting, then echo every received character.
 #  Type in the Serial Monitor input box and press Enter.
@@ -386,13 +386,13 @@ uart_puts:
     },
     {
       id: 'syscalls',
-      name: 'Fibonacci (simulator ecalls)',
-      description: 'Uses simulator-only ecall services (print, sleep, exit) to print Fibonacci numbers.',
+      name: 'Fibonacci (ecall services)',
+      description: 'Uses the ecall services (print, sleep, exit) to print Fibonacci numbers.',
       code: `# ============================================================
 #  Fibonacci numbers using the simulator's ecall services
 #  (RARS-style: a7 = service number, a0 = argument).
-#  NOTE: these services only exist in the simulator - real
-#  hardware has no OS to answer an ecall.
+#  Real hardware has no OS to answer an ecall: Hardware ▸ Run on
+#  board adds a small runtime that implements them over USB / UART.
 #
 #    a7 = 1  print int      a7 = 4  print string
 #    a7 = 11 print char     a7 = 32 sleep a0 ms
@@ -430,6 +430,207 @@ loop:
         li      a0, 0
         li      a7, 93          # exit(0)
         ecall
+`,
+      components: []
+    },
+    {
+      id: 'mini-blink',
+      board: 'supermini',
+      name: 'SuperMini: blink the on-board LED',
+      description: 'Blink the blue LED on GPIO8 (lit when the pin is LOW) and report it on the serial monitor. Try it on a real board with Hardware ▸ Run on board.',
+      code: `# ============================================================
+#  ESP32-C3 SuperMini: blink the on-board blue LED.
+#  The LED sits between 3V3 and GPIO8, so it lights up when
+#  GPIO8 is driven LOW (active low).
+#  Runs in the simulator and on a real board (Hardware menu).
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT_W1TS,     0x08
+        .equ GPIO_OUT_W1TC,     0x0C
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ SYSTIMER_BASE,     0x60023000
+        .equ LED_PIN,           8
+
+        .data
+msg_on:  .asciz "LED on\\n"
+msg_off: .asciz "LED off\\n"
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      s1, 1 << LED_PIN
+        sw      s1, GPIO_OUT_W1TS(s0)   # start with the LED off (pin HIGH)
+        sw      s1, GPIO_ENABLE_W1TS(s0)
+
+loop:
+        sw      s1, GPIO_OUT_W1TC(s0)   # pin LOW  -> LED on
+        la      a0, msg_on
+        li      a7, 4                   # ecall: print string
+        ecall
+        li      a0, 500
+        call    delay_ms
+
+        sw      s1, GPIO_OUT_W1TS(s0)   # pin HIGH -> LED off
+        la      a0, msg_off
+        li      a7, 4
+        ecall
+        li      a0, 500
+        call    delay_ms
+        j       loop
+${DELAY_MS}`,
+      components: []
+    },
+    {
+      id: 'mini-boot',
+      board: 'supermini',
+      name: 'SuperMini: BOOT button toggles the LED',
+      description: 'Each press of the BOOT button (GPIO9) toggles the on-board LED (GPIO8) and prints a press counter.',
+      code: `# ============================================================
+#  BOOT button (GPIO9, LOW while pressed) toggles the on-board
+#  LED (GPIO8, active low). Presses are counted and printed.
+#  In the simulator, click the BOOT button on the board.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT,          0x04
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ GPIO_IN,           0x3C
+        .equ IO_MUX_BASE,       0x60009000
+        .equ FUN_WPU,           1 << 8
+        .equ FUN_IE,            1 << 9
+        .equ SYSTIMER_BASE,     0x60023000
+        .equ LED_PIN,           8
+        .equ BTN_PIN,           9
+
+        .data
+msg:    .asciz "BOOT pressed: "
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      s1, 1 << LED_PIN
+        li      s2, 1 << BTN_PIN
+        sw      s1, GPIO_OUT(s0)        # LED off (pin HIGH)
+        sw      s1, GPIO_ENABLE_W1TS(s0)
+        li      t0, IO_MUX_BASE + 4 + 4 * BTN_PIN
+        li      t1, FUN_IE | FUN_WPU    # input + pull-up (already so after reset)
+        sw      t1, 0(t0)
+        li      s3, 0                   # press count
+
+wait_press:
+        lw      t0, GPIO_IN(s0)
+        and     t0, t0, s2
+        bnez    t0, wait_press          # HIGH = released
+        lw      t0, GPIO_OUT(s0)
+        xor     t0, t0, s1              # toggle the LED
+        sw      t0, GPIO_OUT(s0)
+        addi    s3, s3, 1
+        la      a0, msg
+        li      a7, 4
+        ecall
+        mv      a0, s3
+        li      a7, 1                   # print int
+        ecall
+        li      a0, '\\n'
+        li      a7, 11                  # print char
+        ecall
+        li      a0, 30                  # debounce
+        call    delay_ms
+wait_release:
+        lw      t0, GPIO_IN(s0)
+        and     t0, t0, s2
+        beqz    t0, wait_release
+        li      a0, 30
+        call    delay_ms
+        j       wait_press
+${DELAY_MS}`,
+      components: []
+    },
+    {
+      id: 'usb-echo',
+      board: 'supermini',
+      name: 'USB-Serial-JTAG hello + echo',
+      description: 'Talk to the computer through the USB-Serial-JTAG registers (the SuperMini\'s USB-C port): print a greeting and echo what you type.',
+      code: `# ============================================================
+#  USB-Serial-JTAG: the ESP32-C3's built-in USB serial port
+#  (the USB-C connector of the SuperMini).
+#    EP1      (+0x00): write = send a byte, read = received byte
+#    EP1_CONF (+0x04): bit 0 WR_DONE (write 1: send the buffered
+#                      bytes now), bit 1 IN_EP_DATA_FREE (room to
+#                      send), bit 2 OUT_EP_DATA_AVAIL (byte received)
+#  Type in the serial monitor: each line is echoed in upper case.
+# ============================================================
+        .equ USB_SERIAL,        0x60043000
+        .equ EP1,               0x00
+        .equ EP1_CONF,          0x04
+        .equ WR_DONE,           1 << 0
+        .equ DATA_FREE,         1 << 1
+        .equ DATA_AVAIL,        1 << 2
+
+        .data
+hello:  .asciz  "Hello over USB-Serial-JTAG! Type something:\\n"
+
+        .text
+main:
+        la      a0, hello
+        call    usb_puts
+        call    usb_flush
+echo:
+        call    usb_getc                # a0 = received byte
+        li      t0, 'a'                 # a..z -> A..Z
+        blt     a0, t0, 1f
+        li      t0, 'z'
+        bgt     a0, t0, 1f
+        addi    a0, a0, -32
+1:      call    usb_putc
+        li      t0, '\\n'
+        bne     a0, t0, echo
+        call    usb_flush               # send each line as soon as it ends
+        j       echo
+
+# usb_putc(a0): wait for room in the FIFO, then queue the byte
+usb_putc:
+        li      t0, USB_SERIAL
+1:      lw      t1, EP1_CONF(t0)
+        andi    t1, t1, DATA_FREE
+        bnez    t1, 2f
+        li      t1, WR_DONE             # FIFO full: send it
+        sw      t1, EP1_CONF(t0)
+        j       1b
+2:      sw      a0, EP1(t0)
+        ret
+
+# usb_flush(): send the bytes queued so far
+usb_flush:
+        li      t0, USB_SERIAL
+        li      t1, WR_DONE
+        sw      t1, EP1_CONF(t0)
+        ret
+
+# usb_getc() -> a0: wait for a received byte
+usb_getc:
+        li      t0, USB_SERIAL
+1:      lw      t1, EP1_CONF(t0)
+        andi    t1, t1, DATA_AVAIL
+        beqz    t1, 1b
+        lw      a0, EP1(t0)
+        andi    a0, a0, 0xFF
+        ret
+
+# usb_puts(a0 = NUL-terminated string)
+usb_puts:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s0, 8(sp)
+        mv      s0, a0
+1:      lbu     a0, 0(s0)
+        beqz    a0, 2f
+        call    usb_putc
+        addi    s0, s0, 1
+        j       1b
+2:      lw      s0, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
 `,
       components: []
     }

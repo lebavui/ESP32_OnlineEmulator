@@ -497,7 +497,10 @@
     '.extern', '.weak', '.func', '.endfunc', '.end', '.cfi_startproc', '.cfi_endproc', '.hidden'
   ]);
 
-  function assemble(source) {
+  // opts.textBase / opts.dataBase move the sections (used for the hardware runtime).
+  function assemble(source, opts = {}) {
+    const textBase = opts.textBase !== undefined ? opts.textBase >>> 0 : TEXT_BASE;
+    const dataBase = opts.dataBase !== undefined ? opts.dataBase >>> 0 : DATA_BASE;
     const stmts = parseSource(source);
     const errors = [];
     const labels = new Map();
@@ -540,7 +543,7 @@
       };
     }
 
-    const pcs = { text: TEXT_BASE, data: DATA_BASE };
+    const pcs = { text: textBase, data: dataBase };
     let cur = 'text';
 
     // ---- pass 1: lay out sections and define symbols
@@ -614,15 +617,15 @@
       }
     });
 
-    const text = new Uint8Array(pcs.text - TEXT_BASE);
-    const data = new Uint8Array(pcs.data - DATA_BASE);
+    const text = new Uint8Array(pcs.text - textBase);
+    const data = new Uint8Array(pcs.data - dataBase);
     const listing = [];
     const addrToLine = new Map();
     const lineToAddr = new Map();
 
     function put(section, addr, bytes) {
       const buf = section === 'text' ? text : data;
-      buf.set(bytes, addr - (section === 'text' ? TEXT_BASE : DATA_BASE));
+      buf.set(bytes, addr - (section === 'text' ? textBase : dataBase));
     }
     const le = (v, n) => { const b = []; for (let k = 0; k < n; k++) b.push((v >>> (8 * k)) & 0xff); return b; };
 
@@ -688,15 +691,15 @@
     const constants = {};
     for (const [k, e] of equs) { try { constants[k] = evalEqu(k, true); } catch (_) { /* reported elsewhere */ } }
 
-    let entry = TEXT_BASE;
+    let entry = textBase;
     if (labels.has('_start')) entry = labels.get('_start');
     else if (labels.has('main')) entry = labels.get('main');
 
     return {
       ok: errors.length === 0,
       errors,
-      text: { base: TEXT_BASE, bytes: text },
-      data: { base: DATA_BASE, bytes: data },
+      text: { base: textBase, bytes: text },
+      data: { base: dataBase, bytes: data },
       entry: entry >>> 0,
       symbols,
       constants,
@@ -706,8 +709,65 @@
     };
   }
 
+  // ---------------------------------------------------------------- disassembler
+
+  const CSR_BY_NUM = {};
+  for (const [k, v] of Object.entries(CSR_NAMES)) if (!(v in CSR_BY_NUM)) CSR_BY_NUM[v] = k;
+  const invert = o => { const r = {}; for (const [k, v] of Object.entries(o)) r[Array.isArray(v) ? v.join(',') : v] = k; return r; };
+  const R_BY = invert(R_OPS), I_ALU_BY = invert(I_ALU), SHIFT_BY = invert(SHIFT_I);
+  const LOAD_BY = invert(LOADS), STORE_BY = invert(STORES), BRANCH_BY = invert(BRANCH), CSR_BY = invert(CSR_OPS);
+
+  /**
+   * Decode one 32-bit instruction into its base (non-pseudo) form, e.g. 'addi a0, zero, 5'.
+   * addr resolves PC-relative targets; labels (address -> name) annotates them.
+   */
+  function disassemble(w, addr, labels) {
+    w >>>= 0;
+    const op = w & 0x7f, rd = (w >>> 7) & 31, f3 = (w >>> 12) & 7, rs1 = (w >>> 15) & 31, rs2 = (w >>> 20) & 31, f7 = w >>> 25;
+    const r = n => ABI_NAMES[n];
+    const immI = w >> 20;
+    const immS = ((w >> 25) << 5) | ((w >>> 7) & 31);
+    const immB = ((w >> 31) << 12) | (((w >>> 7) & 1) << 11) | (((w >>> 25) & 0x3f) << 5) | (((w >>> 8) & 0xf) << 1);
+    const immJ = ((w >> 31) << 20) | (((w >>> 12) & 0xff) << 12) | (((w >>> 20) & 1) << 11) | (((w >>> 21) & 0x3ff) << 1);
+    const target = off => {
+      const t = (addr + off) >>> 0;
+      const name = labels && labels.get(t);
+      return '0x' + hex(t) + (name ? ` <${name}>` : '');
+    };
+    switch (op) {
+      case 0x37: return `lui ${r(rd)}, 0x${(w >>> 12).toString(16)}`;
+      case 0x17: return `auipc ${r(rd)}, 0x${(w >>> 12).toString(16)}`;
+      case 0x6f: return `jal ${r(rd)}, ${target(immJ)}`;
+      case 0x67: if (!f3) return `jalr ${r(rd)}, ${immI}(${r(rs1)})`; break;
+      case 0x63: if (f3 in BRANCH_BY) return `${BRANCH_BY[f3]} ${r(rs1)}, ${r(rs2)}, ${target(immB)}`; break;
+      case 0x03: if (f3 in LOAD_BY) return `${LOAD_BY[f3]} ${r(rd)}, ${immI}(${r(rs1)})`; break;
+      case 0x23: if (f3 in STORE_BY) return `${STORE_BY[f3]} ${r(rs2)}, ${immS}(${r(rs1)})`; break;
+      case 0x13:
+        if (f3 === 1 || f3 === 5) {
+          const name = SHIFT_BY[`${f7},${f3}`];
+          if (name) return `${name} ${r(rd)}, ${r(rs1)}, ${rs2}`;
+          break;
+        }
+        return `${I_ALU_BY[f3]} ${r(rd)}, ${r(rs1)}, ${immI}`;
+      case 0x33: { const name = R_BY[`${f7},${f3}`]; if (name) return `${name} ${r(rd)}, ${r(rs1)}, ${r(rs2)}`; break; }
+      case 0x0f: return f3 === 1 ? 'fence.i' : 'fence';
+      case 0x73: {
+        if (f3 === 0) {
+          const sys = { 0x00000073: 'ecall', 0x00100073: 'ebreak', 0x10500073: 'wfi', 0x30200073: 'mret' }[w];
+          if (sys) return sys;
+          break;
+        }
+        const name = CSR_BY[f3];
+        if (!name) break;
+        const csr = w >>> 20, cn = CSR_BY_NUM[csr] || '0x' + csr.toString(16);
+        return `${name} ${r(rd)}, ${cn}, ${f3 & 4 ? rs1 : r(rs1)}`;
+      }
+    }
+    return '(unknown)';
+  }
+
   const RVAsm = {
-    assemble, evaluate, TEXT_BASE, DATA_BASE, REGS, ABI_NAMES, CSR_NAMES, MNEMONICS, hex
+    assemble, disassemble, evaluate, TEXT_BASE, DATA_BASE, REGS, ABI_NAMES, CSR_NAMES, MNEMONICS, hex
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = RVAsm;
   else root.RVAsm = RVAsm;

@@ -45,7 +45,8 @@
         case 0xC80: case 0xB80: case 0xC81: return Math.floor(this.cycle / 4294967296) | 0;
         case 0xC02: case 0xB02: return this.instret % 4294967296 | 0;
         case 0xC82: case 0xB82: return Math.floor(this.instret / 4294967296) | 0;
-        case 0x301: return 0x40001104;   // misa: RV32 I M C
+        case 0x301: return 0x40101104;   // misa: RV32 I M C U (as read from an ESP32-C3)
+        case 0x7E2: return (this.cycle - (this.csr.get(0x7E2) || 0)) % 4294967296 | 0;   // mpccr: Espressif cycle counter
         case 0xF11: return 0x612;        // mvendorid: Espressif
         case 0xF12: case 0xF13: case 0xF14: return 0;
         default: return this.csr.get(n) | 0;
@@ -54,6 +55,7 @@
 
     writeCsr(n, v) {
       if ((n >>> 10) === 3) throw new SimError(`Write to read-only CSR 0x${n.toString(16)}`, this.pc);
+      if (n === 0x7E2) { this.csr.set(n, this.cycle - (v >>> 0)); return; }   // mpccr: keep the offset
       this.csr.set(n, v | 0);
     }
 

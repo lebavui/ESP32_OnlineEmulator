@@ -12,14 +12,15 @@ RVSim C3: a browser-based, Wokwi-style simulator that assembles and runs RISC-V 
 - Run tests: `node tests/run-tests.js` (exits non-zero on failure; prints `N passed, M failed` and a speed benchmark).
 - There is no test framework or single-test filter: tests are top-level blocks using `check(name, cond, info)` in one file. To focus on one, temporarily comment out other blocks or run a snippet with `node -e` that `require`s the modules the same way the test file does.
 - No linter or formatter is configured.
+- Hardware check with a real ESP32-C3 on USB (needs pyserial): `python tools/hw-bridge.py COM11` in one terminal, then `node tools/hw-run.js ram|flash <example-id or file.S> [seconds] [text to send]`. It drives `js/firmware.js` + `js/flasher.js` exactly as the web app does and prints the board's output. `flash` overwrites the board's flash at 0x0.
 
 ## Architecture
 
-Script load order in `index.html` matters: `assembler.js` → `cpu.js` → `esp32c3.js` → `components.js` → `examples.js` → `app.js`. Each file except `app.js` is an IIFE that exports via `module.exports` under Node and otherwise attaches to `window` (`RVAsm`, `RV32Core`/`SimError`, `ESP32C3`, `PARTS`, `EXAMPLES`/`BLANK`). Keep this dual export pattern so the Node tests can `require` the same files the browser loads. `app.js` is browser-only and reads everything from `window`.
+Script load order in `index.html` matters: `assembler.js` → `cpu.js` → `esp32c3.js` → `firmware.js` → `flasher.js` → `boards.js` → `components.js` → `examples.js` → `app.js`. Each file except `app.js` is an IIFE that exports via `module.exports` under Node and otherwise attaches to `window` (`RVAsm`, `RV32Core`/`SimError`, `ESP32C3`, `Firmware`, `Flasher`, `BOARDS`/`DEFAULT_BOARD`, `PARTS`, `EXAMPLES`/`BLANK`). Keep this dual export pattern so the Node tests can `require` the same files the browser loads. `app.js` is browser-only and reads everything from `window`.
 
 Layering (lower layers never depend on the UI):
 
-1. **`assembler.js`**: `RVAsm.assemble(src)` → `{ ok, errors[{line,…}], text, data, … }`. Two-pass; text at `0x40380000` (IRAM view), data at `0x3FCA0000` (DRAM view). Test encodings are checked against GNU `as` reference values.
+1. **`assembler.js`**: `RVAsm.assemble(src)` → `{ ok, errors[{line,…}], text, data, … }`. Two-pass; text at `0x40380000` (IRAM view), data at `0x3FCA0000` (DRAM view). Test encodings are checked against GNU `as` reference values. `RVAsm.disassemble(word, addr, labels)` decodes one word to its base (non-pseudo) form for the Listing panel; a test round-trips every example instruction through it.
 2. **`cpu.js`**: `RV32Core` interpreter. It talks only to a *bus* object (`fetch`, `read8/16/32`, `write8/16/32`, `onEcall`, `onEbreak`). One cycle per instruction; no C extension, interrupts or caches.
 3. **`esp32c3.js`**: `ESP32C3` is the bus: one 384 KB SRAM mapped at both IRAM and DRAM bases, plus peripherals (UART0, GPIO, IO_MUX, SYSTIMER @16 MHz, USB-Serial-JTAG) and simulator `ecall` services (`a7` selects: print int/string/char/hex, time, sleep, read_char, exit). Key API used by both UI and tests:
    - `load(asmResult)`, `run(targetCycle, breakpoints, deadline, skipFirstBreakpoint)` returns a stop reason (`'budget'`, `'time'`, `'halt'`, `'ebreak'`, `'breakpoint'`, `'error'`), `stepOnce()`.
@@ -27,9 +28,14 @@ Layering (lower layers never depend on the UI):
    - `levels()` resolves pin level with priority: chip output driver (`drivenPins()`: `GPIO_ENABLE` only on pins whose IO_MUX `MCU_SEL` selects a GPIO function, plus U0TXD idle-high) → external force → pull-ups (external, IO_MUX `FUN_WPU`, USB D+ on GPIO19). `IOMUX_RESET` / `IOMUX_FUNCS` come from Tables 2-1 and 2-3 of the ESP32-C3 Series Datasheet (v1.7). `floatingPins()`, and reads of floating / `FUN_IE`=0 pins (`floatReads`, `ieOffReads`) and `GPIO_OUT` writes to non-GPIO-function outputs (`noFnWrites`) are recorded so the UI can warn.
    - `sampleDuty()` returns per-pin high-time fraction since the last call; this drives LED/segment brightness for PWM and multiplexing.
    - Output bytes accumulate in `machine.tx`.
-4. **`components.js`**: `PARTS` registry. Each part definition is data + functions (`w/h`, `pins`, `props`, `render`, `update`, `power`, `powerAny`, `rail`, `setRail`, …); the header comment of the file documents the full contract. Adding a part means adding an entry here and handling its input behaviour in `app.js` (`applyInputs`) if it drives pins.
-5. **`examples.js`**: built-in projects (code + parts + wiring). Every example must assemble; several have behaviour tests in `tests/run-tests.js`.
-6. **`app.js`**: all UI in one IIFE: editor (textarea + highlighted overlay), breadboard SVG stage and wiring, inspector, panels (registers, memory, GPIO, listing, serial). The simulation loop is `frame()` via `requestAnimationFrame`: it advances a cycle target by real elapsed time × selected clock rate and calls `machine.run` with a ~13 ms wall-clock budget. Part inputs are pushed to the machine by `applyInputs()`; outputs are pulled via `sampleDuty()` in the render update.
+4. **Real hardware** (no simulator involvement):
+   - **`firmware.js`**: `buildFirmware(asmResult)` → `{ image, segments, entry }`. The program keeps its simulator addresses; a runtime (assembly in `RUNTIME_SRC`, assembled with `RVAsm.assemble(src, { textBase })` right after the program's text, 256-aligned for `mtvec`) disables the RTC/super/TIMG watchdogs, sets `sp` = `HW_STACK_TOP` and `gp`, and handles traps: `ecall` services over USB-Serial-JTAG + UART0, other exceptions print `mcause/mepc/mtval`. `makeImage` writes Espressif's app-image format (header, extended header with chip id 5, segments, XOR checksum, appended SHA-256) that the ROM boots from flash offset 0x0.
+   - **`flasher.js`**: `ESPLoader` speaks the ROM bootloader protocol (SLIP, SYNC, READ_REG chip check, MEM_* to run from RAM, FLASH_* to write; no stub, no FLASH_END) over a transport `{ write, setSignals, onData, usbJtag }`; `WebSerialTransport` adapts Web Serial. The USB-Serial-JTAG reset sequence must pass through DTR=1/RTS=1 (as esptool does), and writes need a timeout because a running program doesn't read the USB port. `startMonitor` switches incoming bytes to the program's output before the chip starts.
+   - Hardware behaviour was verified on an ESP32-C3 SuperMini; IO_MUX reset values in `esp32c3.js` were read back from that chip after a flash boot.
+5. **`boards.js`**: `BOARDS` (DevKitM-1, SuperMini): header pin lists top to bottom, wireable GPIOs, board pull-ups, button/LED positions and SVG artwork. `app.js` `setBoard()` rebuilds the board layer, `POWER_PINS` (keyed by side+index, e.g. `R1`) and `GPIO_PINS`; `changeBoard()` re-attaches supply wires to the nearest pin of the same rail and drops GPIO wires the new board lacks.
+6. **`components.js`**: `PARTS` registry. Each part definition is data + functions (`w/h`, `pins`, `props`, `render`, `update`, `power`, `powerAny`, `rail`, `setRail`, …); the header comment of the file documents the full contract. Adding a part means adding an entry here and handling its input behaviour in `app.js` (`applyInputs`) if it drives pins.
+7. **`examples.js`**: built-in projects (code + parts + wiring, optional `board`). Every example must assemble and build for hardware; several have behaviour tests in `tests/run-tests.js`.
+8. **`app.js`**: all UI in one IIFE: editor (textarea + highlighted overlay), breadboard SVG stage and wiring, inspector, panels (registers, memory, GPIO, listing, serial). The simulation loop is `frame()` via `requestAnimationFrame`: it advances a cycle target by real elapsed time × selected clock rate and calls `machine.run` with a ~13 ms wall-clock budget. Part inputs are pushed to the machine by `applyInputs()`; outputs are pulled via `sampleDuty()` in the render update.
 
 ### Wiring / power model
 
@@ -39,7 +45,7 @@ Layering (lower layers never depend on the UI):
 
 ### Persistence
 
-`serializeProject()` / `loadProject()` define the project JSON (`app: 'rvsim-c3', version: 1`, code, autoPower, wireStyle, components, breakpoints). It is used for localStorage autosave (`rvsim-c3-project-v1*` keys), `.json` save/open, and share links (`#p=...` in the URL hash). Keep new project-level settings in this schema and tolerant of old projects that lack them.
+`serializeProject()` / `loadProject()` define the project JSON (`app: 'rvsim-c3', version: 1`, board, code, autoPower, wireStyle, components, breakpoints). It is used for localStorage autosave (`rvsim-c3-project-v1*` keys), `.json` save/open, and share links (`#p=...` in the URL hash). Keep new project-level settings in this schema and tolerant of old projects that lack them.
 
 ## Conventions
 

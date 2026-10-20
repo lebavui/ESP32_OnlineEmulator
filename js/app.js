@@ -2,18 +2,19 @@
 (function () {
   'use strict';
 
-  const { RVAsm, ESP32C3, PARTS, EXAMPLES, BLANK } = window;
+  const { RVAsm, ESP32C3, PARTS, EXAMPLES, BLANK, BOARDS, DEFAULT_BOARD, Firmware, Flasher } = window;
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const hex8 = v => '0x' + (v >>> 0).toString(16).padStart(8, '0');
   const CPU_HZ = ESP32C3.CPU_HZ;
 
-  const GPIO_PINS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 18, 19, 20, 21];
-  const GPIO_NOTES = {
+  const ALL_GPIOS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 18, 19, 20, 21];   // fixes each GPIO's wire colour
+  const CHIP_NOTES = {
     2: 'strapping', 4: 'JTAG MTMS', 5: 'JTAG MTDI', 6: 'JTAG MTCK', 7: 'JTAG MTDO', 8: 'strapping', 9: 'BOOT button',
     18: 'USB D-', 19: 'USB D+ (pull-up)', 20: 'UART0 RX', 21: 'UART0 TX'
   };
+  let GPIO_PINS = [], GPIO_NOTES = {};          // the selected board's header GPIOs (see setBoard)
   const WIRE_COLORS = ['#2ecc71', '#3498db', '#e67e22', '#b07cff', '#f1c40f', '#1abc9c', '#ff5d73', '#ff8fd1', '#00c2e0', '#9ccc65', '#ffa94d'];
   const STORE_KEY = 'rvsim-c3-project-v1';
 
@@ -292,6 +293,7 @@
     loadedSource = ta.value;
     ioWarned = 0;
     outWarned = 0;
+    hwStopMonitor();
     applyInputs();
     clearSerial();
     clearMessages();
@@ -489,7 +491,7 @@
         if (v !== null) set(g, v);
       }
     }
-    machine.setExternal({ force, value, pullUp: 1 << 9 });   // the DevKit has a pull-up on GPIO9 (BOOT)
+    machine.setExternal({ force, value, pullUp: BOARD.pullUp });   // pull-ups on the board (BOOT button, …)
     if (simState !== 'running') updateAll(true);
   }
 
@@ -574,16 +576,51 @@
   const view = { x: 40, y: 30, k: 1 };
   let compEls = new Map();
 
-  // ---- ESP32-C3-DevKitM-1 board
-  const BOARD = { w: 180, h: 476, y0: 78, pitch: 24, lx: 14, rx: 166 };
-  const LEFT_PINS = ['GND', '3V3', '3V3', '2', '3', 'GND', 'RST', 'GND', '0', '1', '10', 'GND', '5V', '5V', 'GND'];
-  const RIGHT_PINS = ['GND', '21', '20', 'GND', '9', '8', 'GND', '7', '6', '5', '4', 'GND', '18', '19', 'GND'];
+  // ---- development board (js/boards.js); setBoard() switches it
+  let boardId = DEFAULT_BOARD, BOARD = BOARDS[DEFAULT_BOARD];
   const boardPinPos = new Map();        // GPIO number or power pin key -> {x, y, side}
   // Power pins, keyed by side + index ('L0', 'R3', ...) because GND appears many times.
-  const POWER_PINS = {};
-  [['L', LEFT_PINS], ['R', RIGHT_PINS]].forEach(([side, list]) => list.forEach((l, i) => {
-    if (/^(GND|3V3|5V)$/.test(l)) POWER_PINS[side + i] = l;
-  }));
+  let POWER_PINS = {};
+
+  function setBoard(id) {
+    boardId = BOARDS[id] ? id : DEFAULT_BOARD;
+    BOARD = BOARDS[boardId];
+    GPIO_PINS = BOARD.gpios.slice();
+    GPIO_NOTES = Object.assign({}, CHIP_NOTES, BOARD.notes);
+    POWER_PINS = {};
+    [['L', BOARD.left], ['R', BOARD.right]].forEach(([side, list]) => list.forEach((l, i) => {
+      if (/^(GND|3V3|5V)$/.test(l)) POWER_PINS[side + i] = l;
+    }));
+    boardPinPos.clear();
+    boardLayer.innerHTML = boardSvg();
+    $('#boardSel').value = boardId;
+  }
+
+  // Switch boards in the editor: keep supply wires (re-attached to the nearest pin of the
+  // same rail) and GPIO wires to pins the new board has; drop the rest.
+  function changeBoard(id) {
+    if (id === boardId) return;
+    const rails = comps.map(c => Object.fromEntries(powerPins(PARTS[c.type]).filter(p => hasConn(c, p.name)).map(p => [p.name, POWER_PINS[c.conn[p.name]]])));
+    setBoard(id);
+    const dropped = [];
+    comps.forEach((c, i) => {
+      for (const [pin, g] of Object.entries(c.conn)) {
+        if (typeof g === 'number') {
+          if (!GPIO_PINS.includes(g)) { delete c.conn[pin]; dropped.push(`${c.id}.${pin} (GPIO${g})`); }
+        } else {
+          const key = rails[i][pin] && nearestPowerPin(c, pin, rails[i][pin]);
+          if (key) c.conn[pin] = key; else { delete c.conn[pin]; dropped.push(`${c.id}.${pin}`); }
+        }
+        if (c.route) delete c.route[pin];             // routes were drawn for the old pin positions
+      }
+    });
+    renderStage();
+    applyInputs();
+    requestAnimationFrame(fitView);
+    scheduleSave();
+    if (dropped.length) toast(`${BOARD.name} has no pin for: ${dropped.join(', ')} (disconnected)`, 'error');
+    else toast(`Board: ${BOARD.name}`, 'ok');
+  }
   const POWER_COLORS = { GND: '#6b7280', '3V3': '#ff453a' };
 
   const hasConn = (c, pin) => c.conn[pin] !== undefined && c.conn[pin] !== null;
@@ -650,43 +687,29 @@
         </g>
         <text x="${tx}" y="${y + 3}" class="pin-label${isGpio ? '' : ' pwr'}" text-anchor="${side === 'L' ? 'start' : 'end'}">${text}</text>`;
     };
-    LEFT_PINS.forEach((l, i) => { pins += pin(l, BOARD.lx, BOARD.y0 + i * BOARD.pitch, 'L', 'L' + i); });
-    RIGHT_PINS.forEach((l, i) => { pins += pin(l, BOARD.rx, BOARD.y0 + i * BOARD.pitch, 'R', 'R' + i); });
-    const antenna = 'M60 22 h56 v6 h-50 v6 h50 v6 h-56';
+    BOARD.left.forEach((l, i) => { pins += pin(l, BOARD.lx, BOARD.y0 + i * BOARD.pitch, 'L', 'L' + i); });
+    BOARD.right.forEach((l, i) => { pins += pin(l, BOARD.rx, BOARD.y0 + i * BOARD.pitch, 'R', 'R' + i); });
+    const btn = (kind, label, tip) => {
+      const p = BOARD.buttons[kind];
+      return `<g class="board-btn" data-board-btn="${kind}" transform="translate(${p.x} ${p.y})">
+          <rect x="-14" y="-10" width="28" height="20" rx="2" fill="#c9ccd2"/>
+          <circle class="bb-cap" r="6.5" fill="#2b2f36"/>
+          <text y="22" class="tiny light" text-anchor="middle">${label}</text>
+          <title>${tip}</title>
+        </g>`;
+    };
+    const led = BOARD.led ? `<g class="board-led" transform="translate(${BOARD.led.x} ${BOARD.led.y})">
+          <rect x="-4" y="-3" width="8" height="6" rx="1" fill="#d9dde3"/>
+          <circle class="bl-glow" r="9" fill="${BOARD.led.color}" opacity="0" filter="url(#glowBlur)"/>
+          <rect class="bl-lit" x="-4" y="-3" width="8" height="6" rx="1" fill="${BOARD.led.color}" opacity="0"/>
+          <title>On-board LED: GPIO${BOARD.led.gpio}${BOARD.led.activeLow ? ', lit when the pin is LOW' : ''}</title>
+        </g>` : '';
     return `
       <g class="board">
-        <rect x="68" y="452" width="44" height="30" rx="3" fill="#b8bec8" stroke="#7d8591"/>
-        <rect x="74" y="458" width="32" height="8" rx="2" fill="#5d6470"/>
-        <rect width="${BOARD.w}" height="${BOARD.h}" rx="10" fill="#18202e" stroke="#0a0d13" stroke-width="2"/>
-        <circle cx="12" cy="12" r="5" fill="#0a0d13"/><circle cx="168" cy="12" r="5" fill="#0a0d13"/>
-        <circle cx="12" cy="${BOARD.h - 12}" r="5" fill="#0a0d13"/><circle cx="168" cy="${BOARD.h - 12}" r="5" fill="#0a0d13"/>
-        <rect x="50" y="10" width="80" height="150" rx="3" fill="#1d2a22"/>
-        <path d="${antenna}" fill="none" stroke="#c9a74a" stroke-width="2"/>
-        <rect x="54" y="48" width="72" height="108" rx="3" fill="url(#shield)" stroke="#7e8590"/>
-        <text x="90" y="86" class="chip-text" text-anchor="middle">ESP32-C3</text>
-        <text x="90" y="100" class="chip-sub" text-anchor="middle">MINI-1</text>
-        <text x="90" y="128" class="chip-sub" text-anchor="middle">RISC-V · 160 MHz</text>
-        <text x="90" y="140" class="chip-sub" text-anchor="middle">400 KB SRAM</text>
-        <rect x="${BOARD.lx - 9}" y="${BOARD.y0 - 12}" width="18" height="${BOARD.pitch * 14 + 24}" rx="2" fill="#0b0d11"/>
-        <rect x="${BOARD.rx - 9}" y="${BOARD.y0 - 12}" width="18" height="${BOARD.pitch * 14 + 24}" rx="2" fill="#0b0d11"/>
-        <rect x="70" y="182" width="40" height="40" rx="2" fill="#11151c" stroke="#2a3342"/>
-        <text x="90" y="205" class="chip-sub light" text-anchor="middle">CP2102</text>
-        <circle id="pwrLed" cx="76" cy="246" r="3.5" fill="#ff3b30"/>
-        <text x="84" y="249" class="tiny light">PWR</text>
-        <text x="90" y="300" class="board-title" text-anchor="middle">ESP32-C3</text>
-        <text x="90" y="314" class="tiny light" text-anchor="middle">DevKitM-1</text>
-        <g class="board-btn" data-board-btn="boot" transform="translate(58 420)">
-          <rect x="-14" y="-10" width="28" height="20" rx="2" fill="#c9ccd2"/>
-          <circle class="bb-cap" r="6.5" fill="#2b2f36"/>
-          <text y="22" class="tiny light" text-anchor="middle">BOOT</text>
-          <title>BOOT button (GPIO9, active low)</title>
-        </g>
-        <g class="board-btn" data-board-btn="rst" transform="translate(122 420)">
-          <rect x="-14" y="-10" width="28" height="20" rx="2" fill="#c9ccd2"/>
-          <circle class="bb-cap" r="6.5" fill="#2b2f36"/>
-          <text y="22" class="tiny light" text-anchor="middle">RST</text>
-          <title>RESET: restart the program</title>
-        </g>
+        ${BOARD.art()}
+        ${led}
+        ${btn('boot', 'BOOT', 'BOOT button (GPIO9, active low)')}
+        ${btn('rst', 'RST', 'RESET: restart the program')}
         ${pins}
       </g>`;
   }
@@ -722,7 +745,7 @@
   }
 
   function wireColor(g) {
-    return typeof g === 'number' ? WIRE_COLORS[GPIO_PINS.indexOf(g) % WIRE_COLORS.length] : POWER_COLORS[POWER_PINS[g]];
+    return typeof g === 'number' ? WIRE_COLORS[ALL_GPIOS.indexOf(g) % WIRE_COLORS.length] : POWER_COLORS[POWER_PINS[g]];
   }
 
   function wirePath(ax, ay, dir, bp) {
@@ -766,7 +789,7 @@
     // Board pin ahead of the part pin: straight out to its row, then across.
     if ((bp.y - ay) * dy >= 16) return orthoPoints([a, bp], false);
     // Otherwise leave the pin, run beside the board (lanes keep neighbouring wires apart), then go in.
-    const lane = typeof g === 'number' ? (GPIO_PINS.indexOf(g) % 4) * 5 : 0;
+    const lane = typeof g === 'number' ? (ALL_GPIOS.indexOf(g) % 4) * 5 : 0;
     const sy = ay + dy * 16, mx = bp.x + (bp.side === 'L' ? -1 : 1) * (20 + lane);
     return orthoPoints([a, { x: ax, y: sy }, { x: mx, y: sy }, { x: mx, y: bp.y }, bp], false);
   }
@@ -986,6 +1009,16 @@
       el.classList.toggle('out-hi', out === 1 && duty[g] > 0.02);
       el.classList.toggle('out-lo', out === 1 && duty[g] <= 0.02);
       el.classList.toggle('in-hi', out === 0 && lv === 1);
+    }
+    if (BOARD.led) {
+      // LED between 3V3 and the pin (active low) or the pin and GND: lit while the chip drives the pin to that level
+      const g = BOARD.led.gpio, driven = (enable >>> g) & 1;
+      const on = driven ? (BOARD.led.activeLow ? 1 - duty[g] : duty[g]) : 0;
+      const el = boardLayer.querySelector('.board-led');
+      if (el) {
+        el.querySelector('.bl-lit').setAttribute('opacity', on > 0.02 ? (0.35 + 0.65 * on).toFixed(2) : 0);
+        el.querySelector('.bl-glow').setAttribute('opacity', (0.9 * on).toFixed(2));
+      }
     }
     const boot = boardLayer.querySelector('[data-board-btn="boot"] .bb-cap');
     if (boot) boot.setAttribute('r', bootPressed ? 5 : 6.5);
@@ -1504,6 +1537,10 @@
     if (!machine.tx.length) return;
     const text = decoder.decode(new Uint8Array(machine.tx), { stream: true });
     machine.tx.length = 0;
+    appendSerial(text);
+  }
+
+  function appendSerial(text) {
     const stick = serialAtBottom();
     if (!serialTail) { serialTail = document.createTextNode(''); serialOut.appendChild(serialTail); }
     serialTail.data += text;
@@ -1525,8 +1562,12 @@
     const eol = { lf: '\n', cr: '\r', crlf: '\r\n', none: '' }[$('#serialEol').value];
     const bytes = new TextEncoder().encode(inp.value + eol);
     if (!bytes.length) return;
-    machine.uartReceive(bytes);
     inp.value = '';
+    if (hw.monitoring) {
+      hw.transport.write(bytes).catch(err => toast(err.message, 'error'));
+      return;
+    }
+    machine.uartReceive(bytes);
     if (simState !== 'running') toast('Queued in UART0 RX FIFO — run the program to receive it');
   });
   $('#serialClear').addEventListener('click', clearSerial);
@@ -1536,13 +1577,13 @@
   const MSG_ICONS = { error: '✖', warn: '⚠', info: 'ℹ' };
   let msgTotals = { error: 0, warn: 0, info: 0 }, msgUnseen = 0;
 
-  function addMessage(level, text, line) {
+  function addMessage(level, text, line, fromBoard) {
     if (!msgTotals.error && !msgTotals.warn && !msgTotals.info) msgList.textContent = '';
     msgTotals[level]++;
     const stick = msgList.scrollHeight - msgList.scrollTop - msgList.clientHeight < 30;
     const row = document.createElement('div');
     row.className = 'msg ' + level;
-    row.innerHTML = `<span class="mi">${MSG_ICONS[level]}</span><span class="mt mono">${machine.timeSeconds.toFixed(3)} s</span>
+    row.innerHTML = `<span class="mi">${MSG_ICONS[level]}</span><span class="mt mono">${fromBoard ? 'board' : machine.timeSeconds.toFixed(3) + ' s'}</span>
       <span class="mx">${esc(text)}</span>${line ? `<button type="button" class="ml mono" data-line="${line}">line ${line}</button>` : ''}`;
     msgList.appendChild(row);
     if (stick) msgList.scrollTop = msgList.scrollHeight;
@@ -1572,6 +1613,311 @@
     if (b) gotoLine(+b.dataset.line);
   });
   $('#msgClear').addEventListener('click', clearMessages);
+
+  // ================================================================ real hardware (Web Serial)
+
+  // "Build for hardware" (js/firmware.js) + the ROM bootloader protocol (js/flasher.js).
+  // While a program runs on the board, its serial output goes to the serial monitor and the
+  // monitor's input is sent to the board.
+  const hw = { port: null, transport: null, busy: false, monitoring: false, decoder: null };
+  const hasWebSerial = typeof navigator !== 'undefined' && 'serial' in navigator;
+
+  function hwState(text, kind) {
+    const el = $('#hwState');
+    el.textContent = text || '';
+    el.className = 'hw-state' + (kind ? ' ' + kind : '');
+    // the line is kept short (it shares the top bar); the tooltip has the details
+    const port = hw.transport ? hw.transport.port : hw.port;
+    el.title = (text || '') + (port ? `
+Serial port: ${portLabel(port)}` : '');
+    $('#serialIn').placeholder = hw.monitoring ? 'Send text to the board…' : 'Send text to the program (UART0 / USB RX)…';
+  }
+
+  function updateHwControls() {
+    for (const id of ['hwRam', 'hwFlash']) {
+      $('#' + id).disabled = hw.busy || !hasWebSerial;
+      if (!hasWebSerial) $('#' + id).title = 'Needs the Web Serial API: Chrome or Edge on a desktop, opened from https:// or localhost';
+    }
+    $('#hwBin').disabled = hw.busy;
+    $('#hwReset').disabled = hw.busy || !hw.transport;
+    $('#hwDisconnect').disabled = hw.busy || !hw.transport;
+    $('#hwPickPort').disabled = hw.busy || !hasWebSerial;
+    $('#hwForget').disabled = hw.busy || !hw.port || !hw.port.forget;
+    for (const b of $$('#hwPorts button')) b.disabled = hw.busy;
+  }
+
+  // ---- serial port choice. Browsers don't reveal COM / tty names to pages, only the USB
+  // vendor:product IDs, so ports are named after the USB chip behind them.
+  const USB_NAMES = {
+    '303a:1001': 'ESP32 USB-Serial-JTAG', '10c4:ea60': 'CP210x USB-UART', '1a86:7523': 'CH340 USB-UART',
+    '1a86:55d3': 'CH343 USB-UART', '1a86:55d4': 'CH9102 USB-UART', '0403:6001': 'FTDI FT232R', '0403:6015': 'FTDI FT231X'
+  };
+  const usbId = port => {
+    const i = port.getInfo();
+    return i.usbVendorId === undefined ? '' : `${i.usbVendorId.toString(16).padStart(4, '0')}:${(i.usbProductId || 0).toString(16).padStart(4, '0')}`;
+  };
+  const USB_SHORT = { '303a:1001': 'USB-JTAG', '10c4:ea60': 'CP210x', '1a86:7523': 'CH340', '1a86:55d3': 'CH343', '1a86:55d4': 'CH9102', '0403:6001': 'FT232R', '0403:6015': 'FT231X' };
+  let grantedPorts = [];
+  function portShort(port) {
+    const id = usbId(port), same = grantedPorts.filter(p => usbId(p) === id);
+    return (USB_SHORT[id] || (id ? 'USB ' + id : 'Serial')) + (same.length > 1 ? ` #${same.indexOf(port) + 1}` : '');
+  }
+  function portLabel(port) {
+    const id = usbId(port);
+    if (!id) return 'Serial port without a USB ID (e.g. Bluetooth)';
+    const same = grantedPorts.filter(p => usbId(p) === id);
+    const n = same.length > 1 ? ` #${same.indexOf(port) + 1}` : '';
+    return `${USB_NAMES[id] || 'USB serial device'}${n} (${id})`;
+  }
+
+  async function refreshPorts() {
+    if (!hasWebSerial) {
+      $('#hwPorts').innerHTML = '<div class="menu-note">Web Serial is not available in this browser.</div>';
+      return;
+    }
+    grantedPorts = await navigator.serial.getPorts();
+    if (hw.port && !grantedPorts.includes(hw.port)) hw.port = null;
+    $('#hwPorts').innerHTML = grantedPorts.length ? grantedPorts.map((p, i) => {
+      const cur = p === hw.port, open = hw.transport && hw.transport.port === p;
+      const state = open ? (hw.monitoring ? 'In use: the program\'s output is shown' : 'Connected') : cur ? 'Selected · connects on the next run' : 'Allowed · click to use this port';
+      return `<button type="button" class="port-item${cur ? ' cur' : ''}" data-port="${i}"><b>${cur ? '● ' : '○ '}${esc(portLabel(p))}</b><span>${state}</span></button>`;
+    }).join('') : '<div class="menu-note">No port allowed yet: choose one below (the board must be plugged in).</div>';
+    showPort();
+    updateHwControls();
+  }
+
+  // Shows the chosen port next to the Hardware menu while nothing else is going on.
+  function showPort() {
+    if (hw.busy || hw.monitoring) return;
+    if (hw.transport) hwState('● ' + portShort(hw.transport.port), 'ok');
+    else if (hw.port) hwState('○ ' + portShort(hw.port));
+    else hwState('');
+  }
+
+  async function hwSelectPort(port) {
+    if (hw.busy || port === hw.port) return;
+    if (hw.transport) { await hw.transport.close(); hwClosed(); }
+    hw.port = port;
+    await refreshPorts();
+    toast(`Serial port: ${portLabel(port)}`, 'ok');
+  }
+
+  $('#btnHw').addEventListener('click', () => { refreshPorts(); });
+  $('#hwPorts').addEventListener('click', e => {
+    const b = e.target.closest('[data-port]');
+    if (b) { closeMenus(); hwSelectPort(grantedPorts[+b.dataset.port]); }
+  });
+  $('#hwPickPort').addEventListener('click', async () => {
+    closeMenus();
+    let port;
+    try { port = await navigator.serial.requestPort(); } catch (_) { return; }   // chooser cancelled
+    grantedPorts = await navigator.serial.getPorts();
+    await hwSelectPort(port);
+  });
+  $('#hwForget').addEventListener('click', async () => {
+    closeMenus();
+    if (!hw.port || hw.busy) return;
+    const label = portLabel(hw.port);
+    if (hw.transport) { await hw.transport.close(); hwClosed(); }
+    try { await hw.port.forget(); } catch (_) { /* older browsers */ }
+    hw.port = null;
+    await refreshPorts();
+    toast(`Forgot ${label}`);
+  });
+
+  function hwBuild() {
+    const res = assembleNow();
+    if (!res) return null;
+    try {
+      return Firmware.buildFirmware(res);
+    } catch (e) {
+      addMessage('error', e.message, 0, true);
+      toast(e.message, 'error');
+      return null;
+    }
+  }
+
+  async function hwOpen() {
+    if (hw.transport) return hw.transport;
+    // The chosen port, or the only one the user already allowed for this page; otherwise ask.
+    grantedPorts = await navigator.serial.getPorts();
+    if (hw.port && !grantedPorts.includes(hw.port)) hw.port = null;
+    const port = hw.port || (grantedPorts.length === 1 ? grantedPorts[0] : await navigator.serial.requestPort());
+    grantedPorts = await navigator.serial.getPorts();
+    hw.port = port;
+    const t = new Flasher.WebSerialTransport(port);
+    try {
+      await t.open(115200);
+    } catch (e) {
+      throw new Error(`Could not open ${portLabel(port)}: another program or browser tab is using it (close its serial monitor), or choose another port in the Hardware menu`);
+    }
+    hw.transport = t;
+    hwState('● ' + portShort(port), 'ok');
+    return t;
+  }
+
+  function hwClosed(msg) {
+    hw.transport = null;
+    hw.monitoring = false;
+    hwState('');
+    showPort();
+    if (msg) { addMessage('warn', msg, 0, true); toast(msg, 'error'); }
+    updateHwControls();
+  }
+
+  if (hasWebSerial) {
+    navigator.serial.addEventListener('disconnect', e => {
+      if (hw.transport && e.target === hw.transport.port) {
+        hw.transport.close();
+        hwClosed('The board was unplugged');
+      }
+      refreshPorts();
+    });
+    navigator.serial.addEventListener('connect', () => refreshPorts());
+    refreshPorts();
+  }
+
+  // Progress card under the Hardware menu: three steps, a bar, and the latest detail line.
+  // It stays up a few seconds after success, and until closed after an error.
+  const hp = {
+    el: $('#hwProgress'), steps: [], cur: -1, timer: 0,
+    start(title, steps) {
+      clearTimeout(this.timer);
+      this.steps = steps;
+      this.cur = -1;
+      $('#hpTitle').textContent = title;
+      $('#hpSteps').innerHTML = steps.map(s => `<li><span class="hp-icon"></span>${esc(s)}</li>`).join('');
+      this.el.className = 'hw-progress';
+      this.el.hidden = false;
+      this.bar(null);
+      this.detail('');
+    },
+    step(i) {
+      const items = $$('#hpSteps li');
+      items.forEach((li, k) => { li.className = k < i ? 'done' : k === i ? 'active' : ''; });
+      this.cur = i;
+    },
+    bar(f) {
+      const fill = $('#hpFill');
+      fill.parentNode.classList.toggle('indet', f === null);
+      fill.style.width = f === null ? '' : `${Math.round(f * 100)}%`;
+      $('#hpPct').textContent = f === null ? '' : `${Math.round(f * 100)}%`;
+    },
+    detail(text) { $('#hpDetail').textContent = text; },
+    done(text) {
+      this.step(this.steps.length);
+      this.bar(1);
+      this.detail(text);
+      this.el.classList.add('ok');
+      this.timer = setTimeout(() => this.hide(), 6000);
+    },
+    fail(text) {
+      $$('#hpSteps li').forEach((li, k) => { if (k === this.cur) li.className = 'failed'; });
+      this.bar(0);
+      this.detail(text);
+      this.el.classList.add('err');
+    },
+    hide() { clearTimeout(this.timer); this.el.hidden = true; }
+  };
+  $('#hpClose').addEventListener('click', () => hp.hide());
+
+  async function hwRun(mode) {
+    if (hw.busy) return;
+    const fw = hwBuild();
+    if (!fw) return;
+    if (simState !== 'stopped') stop();
+    hw.busy = true;
+    hw.monitoring = false;
+    updateHwControls();
+    const flash = mode === 'flash';
+    hp.start(flash ? 'Flashing the board' : 'Running on the board (RAM)',
+      ['Connect to the ROM bootloader', flash ? 'Erase and write flash' : 'Load the program into SRAM', flash ? 'Restart the board' : 'Start the program']);
+    hp.step(0);
+    hp.detail('Choose the board\'s serial port…');
+    try {
+      const t = await hwOpen();
+      clearSerial();
+      clearMessages();
+      const loader = new Flasher.ESPLoader(t, m => {
+        addMessage('info', m, 0, true);
+        hwState(m);
+        hp.detail(m);
+        if (/^(Restarting|Starting)/.test(m)) hp.step(2);
+      });
+      await loader.connect();
+      hp.step(1);
+      hp.bar(0);
+      hw.decoder = new TextDecoder();
+      const onOutput = bytes => appendSerial(hw.decoder.decode(bytes, { stream: true }));
+      const progress = (f, done, total) => {
+        hp.bar(f);
+        hp.detail(`${flash ? 'Written' : 'Loaded'} ${done} of ${total} bytes`);
+        hwState(`${flash ? 'Flashing' : 'Loading'} ${Math.round(f * 100)}%`);
+      };
+      if (flash) await loader.writeFlash(fw.image, 0, progress, onOutput);
+      else await loader.runInRam(fw.segments, fw.entry, progress, onOutput);
+      hw.monitoring = true;
+      const size = fw.segments.reduce((n, sg) => n + sg.data.length, 0);
+      const doneMsg = flash
+        ? `Flashed a ${fw.image.length}-byte image at 0x0 and restarted the board: the program now runs at every power-up`
+        : `Loaded ${size} bytes into SRAM and started the program (it is lost when the board resets)`;
+      addMessage('info', doneMsg, 0, true);
+      hp.done(flash ? `✓ Done: ${fw.image.length} bytes written. The program is running — output in the serial monitor.`
+        : `✓ Done: ${size} bytes loaded. The program is running — output in the serial monitor.`);
+      toast(flash ? 'Flashed — the program is running on the board' : 'The program is running on the board', 'ok');
+      hwState('● Running · ' + portShort(hw.transport.port), 'run');
+      $('[data-tab="serial"]').click();
+    } catch (e) {
+      if (e && e.name === 'NotFoundError') { hwState(''); hp.hide(); return; }   // port chooser cancelled
+      const msg = e && e.message ? e.message : String(e);
+      addMessage('error', msg, 0, true);
+      toast(msg, 'error');
+      hp.fail(hp.cur === 0 && !/BOOT/.test(msg) ? `${msg}. If the board doesn't answer: hold BOOT, press RST, release BOOT, then try again.` : msg);
+      hwState('✖ Failed', 'err');
+      if (/open|lost|device/i.test(msg) && hw.transport) { await hw.transport.close(); hwClosed(); }
+    } finally {
+      hw.busy = false;
+      updateHwControls();
+    }
+  }
+
+  // The simulator and the board share the serial monitor: running the simulator stops showing the board.
+  function hwStopMonitor() {
+    if (!hw.monitoring) return;
+    hw.monitoring = false;
+    hw.transport.onData = null;
+    showPort();
+  }
+
+  $('#hwRam').addEventListener('click', () => { closeMenus(); hwRun('ram'); });
+  $('#hwFlash').addEventListener('click', () => { closeMenus(); hwRun('flash'); });
+  $('#hwBin').addEventListener('click', () => {
+    closeMenus();
+    const fw = hwBuild();
+    if (!fw) return;
+    download('firmware.bin', fw.image, 'application/octet-stream');
+    addMessage('info', `firmware.bin: ${fw.image.length} bytes. Write it with: esptool.py --chip esp32c3 write_flash 0x0 firmware.bin`, 0, true);
+  });
+  $('#hwReset').addEventListener('click', async () => {
+    closeMenus();
+    if (!hw.transport || hw.busy) return;
+    if (simState !== 'stopped') stop();
+    clearSerial();
+    hw.decoder = new TextDecoder();
+    const loader = new Flasher.ESPLoader(hw.transport);
+    loader.startMonitor(bytes => appendSerial(hw.decoder.decode(bytes, { stream: true })));
+    hw.monitoring = true;
+    await loader.hardReset().catch(e => toast(e.message, 'error'));
+    hwState('● Running · ' + portShort(hw.transport.port), 'run');
+    addMessage('info', 'Board reset: it runs what is in its flash', 0, true);
+  });
+  $('#hwDisconnect').addEventListener('click', async () => {
+    closeMenus();
+    if (!hw.transport) return;
+    await hw.transport.close();
+    hwClosed();
+  });
+  updateHwControls();
 
   // ---- registers
   const regsEl = $('#regs');
@@ -1671,10 +2017,20 @@
   let lastListingPc = -1;
   function renderListing() {
     if (!program) return;
+    // One row per machine word: a pseudo-instruction such as li / la / call expands to several
+    // base instructions, each with its own address, encoding and disassembly.
+    const labels = new Map(Object.entries(program.symbols).map(([k, v]) => [v, k]));
     const rows = program.listing.map(it => {
-      const code = it.words ? it.words.map(w => w.toString(16).padStart(8, '0')).join(' ')
-        : it.bytes.slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join(' ') + (it.bytes.length > 8 ? ' …' : '');
-      return `<tr data-addr="${it.addr}" data-line="${it.line}"><td class="maddr">${hex8(it.addr)}</td><td class="mono">${code}</td><td class="dim">${it.line}</td><td class="src">${highlightLine(it.src.trim())}</td></tr>`;
+      const src = `<td class="dim">${it.line}</td><td class="src">${highlightLine(it.src.trim())}</td>`;
+      if (!it.words) {
+        const code = it.bytes.slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join(' ') + (it.bytes.length > 8 ? ' …' : '');
+        return `<tr data-addr="${it.addr}" data-line="${it.line}"><td class="maddr">${hex8(it.addr)}</td><td>${code}</td><td></td>${src}</tr>`;
+      }
+      return it.words.map((w, k) => {
+        const a = it.addr + 4 * k;
+        return `<tr data-addr="${a}" data-line="${it.line}"${k ? ' class="cont"' : ''}><td class="maddr">${hex8(a)}</td><td>${w.toString(16).padStart(8, '0')}</td>` +
+          `<td class="basic">${esc(RVAsm.disassemble(w, a, labels))}</td>${k ? '<td></td><td></td>' : src}</tr>`;
+      }).join('');
     }).join('');
     $('#listBody').innerHTML = rows;
     listingRows = new Map();
@@ -1746,6 +2102,7 @@
   function serializeProject() {
     return {
       app: 'rvsim-c3', version: 1,
+      board: boardId,
       code: ta.value,
       autoPower,
       wireStyle,
@@ -1759,6 +2116,7 @@
     ta.value = p.code || '';
     setAutoPower(p.autoPower !== false);
     setWireStyle(p.wireStyle);
+    setBoard(p.board);
     comps = normalizeComps(p.components);
     breakpointLines = new Set((p.breakpoints || []).filter(n => Number.isInteger(n)));
     selection = null;
@@ -1813,7 +2171,7 @@
     const ex = EXAMPLES.find(x => x.id === b.dataset.ex);
     const pristine = EXAMPLES.some(x => x.code === ta.value) || ta.value.trim() === BLANK.trim() || !ta.value.trim();
     if (!pristine && !confirm(`Load example "${ex.name}"? Your current program and parts will be replaced.\n(Tip: use Save first to keep them.)`)) return;
-    loadProject({ code: ex.code, components: JSON.parse(JSON.stringify(ex.components)) });
+    loadProject({ code: ex.code, board: ex.board, components: JSON.parse(JSON.stringify(ex.components)) });
     toast(`Loaded example: ${ex.name}`, 'ok');
   });
 
@@ -1947,7 +2305,9 @@
   // ================================================================ init
 
   async function init() {
-    boardLayer.innerHTML = boardSvg();
+    $('#boardSel').innerHTML = Object.entries(BOARDS).map(([id, b]) => `<option value="${id}" title="${esc(b.name)}">Board: ${esc(b.short)}</option>`).join('');
+    $('#boardSel').addEventListener('change', e => changeBoard(e.target.value));
+    setBoard(DEFAULT_BOARD);
     try {
       const l = JSON.parse(localStorage.getItem(STORE_KEY + '-layout') || 'null');
       if (l && l.left) layout.style.setProperty('--left', l.left);
@@ -1966,7 +2326,7 @@
     }
     if (!project || typeof project.code !== 'string') {
       const ex = EXAMPLES[0];
-      project = { code: ex.code, components: JSON.parse(JSON.stringify(ex.components)) };
+      project = { code: ex.code, board: ex.board, components: JSON.parse(JSON.stringify(ex.components)) };
     }
     loadProject(project, { noSave: true });
     updateControls();

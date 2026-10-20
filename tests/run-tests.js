@@ -51,6 +51,34 @@ for (const [src, want] of ENC) {
   check('bnez self', dv.getUint32(16, true) === 0x00051063, hex(dv.getUint32(16, true)));
 }
 
+// ---- disassembler: pseudo-instructions show their base instructions
+{
+  const r = RVAsm.assemble('main: li a0, 0x12345678\n mv a1, a0\n beqz a0, main\n ret\n csrr a0, mcycle\n');
+  const labels = new Map(Object.entries(r.symbols).map(([k, v]) => [v, k]));
+  const got = [];
+  for (const it of r.listing) it.words.forEach((w, k) => got.push(RVAsm.disassemble(w, it.addr + 4 * k, labels)));
+  const want = ['lui a0, 0x12345', 'addi a0, a0, 1656', 'addi a1, a0, 0', 'beq a0, zero, 0x40380000 <main>',
+    'jalr zero, 0(ra)', 'csrrs a0, mcycle, zero'];
+  check('disassemble pseudo expansions', JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
+}
+// round trip: every non-PC-relative instruction of every example re-assembles to the same word
+{
+  const PC_REL = new Set([0x6f, 0x63, 0x17]);
+  let bad = [];
+  for (const ex of EXAMPLES) {
+    const r = RVAsm.assemble(ex.code);
+    for (const it of r.listing) (it.words || []).forEach((w, k) => {
+      const d = RVAsm.disassemble(w, it.addr + 4 * k);
+      if (d === '(unknown)') { bad.push(`${ex.id}: ${hex(w)}`); return; }
+      if (PC_REL.has(w & 0x7f)) return;
+      const back = RVAsm.assemble(d);
+      const w2 = back.ok ? new DataView(back.text.bytes.buffer).getUint32(0, true) : null;
+      if (w2 !== w) bad.push(`${ex.id}: ${d} ${hex(w)} -> ${w2 === null ? JSON.stringify(back.errors) : hex(w2)}`);
+    });
+  }
+  check('disassemble round trip (examples)', bad.length === 0, bad.slice(0, 5).join('; '));
+}
+
 // ---- errors
 {
   const r = RVAsm.assemble('foo a0\naddi a0, a0, 5000\nlw a0, 0(q9)\nj nowhere\n');
@@ -221,11 +249,13 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   check('FUN_WPD pulls down', ((m.core.x[10] >> 4) & 1) === 0 && ((m.floatReads >> 4) & 1) === 0, hex(m.core.x[10]));
 }
 
-{ // IO_MUX MCU_SEL and pin states after reset (datasheet Tables 2-1, 2-3)
+{ // IO_MUX MCU_SEL and pin states after reset (datasheet Table 2-3, values measured on a chip)
   const fresh = () => { const m = new ESP32C3(); m.load(RVAsm.assemble('j .')); return m; };
   let m = fresh();
-  check('io_mux reset GPIO6 (MTCK: IE + WPU)', m.iomux[6] === 0xB00, hex(m.iomux[6]));
-  check('io_mux reset GPIO21 (U0TXD: WPU)', m.iomux[21] === 0x900, hex(m.iomux[21]));
+  // values read back on a real ESP32-C3 after a flash boot
+  check('io_mux reset GPIO6 (MTCK: IE, no pull)', m.iomux[6] === 0xA00, hex(m.iomux[6]));
+  check('io_mux reset GPIO12 (function 1 after DIO flash boot)', m.iomux[12] === 0x1B00 && ((m.gpioFnMask >> 12) & 1) === 1, hex(m.iomux[12]));
+  check('io_mux reset GPIO21 (U0TXD: IE + WPU)', m.iomux[21] === 0xB00, hex(m.iomux[21]));
   check('U0TXD idles high', ((m.levels() >> 21) & 1) === 1 && ((m.floatingPins() >> 21) & 1) === 0, hex(m.levels()));
   check('USB D+ pulled up', ((m.levels() >> 19) & 1) === 1 && ((m.floatingPins() >> 19) & 1) === 0, hex(m.levels()));
   // GPIO2 (function 0 = GPIO2) is driven directly; GPIO4 (function 0 = MTMS) needs MCU_SEL = 1
@@ -270,6 +300,68 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   const res = m.run(CPU_HZ * 10, null, Infinity);
   const out = Buffer.from(m.tx).toString();
   check('fibonacci', res === 'halt' && out.includes('46368\n'), res + ' ' + JSON.stringify(out.slice(-40)));
+}
+
+{ // SuperMini examples: on-board LED on GPIO8 (active low), BOOT button, USB-Serial-JTAG echo
+  let m = exampleMachine('mini-blink');
+  m.run(CPU_HZ * 0.25, null, Infinity);
+  const on = (m.levels() >> 8) & 1;
+  m.run(CPU_HZ * 0.75, null, Infinity);
+  const off = (m.levels() >> 8) & 1;
+  check('mini-blink drives GPIO8 low then high', on === 0 && off === 1 && Buffer.from(m.tx).toString().startsWith('LED on\nLED off\n'), [on, off]);
+
+  m = exampleMachine('mini-boot');
+  m.setExternal({ pullUp: 1 << 9 });
+  m.run(CPU_HZ * 0.05, null, Infinity);
+  m.setExternal({ force: 1 << 9, value: 0, pullUp: 1 << 9 });          // press BOOT
+  m.run(CPU_HZ * 0.15, null, Infinity);
+  m.setExternal({ pullUp: 1 << 9 });                                   // release
+  m.run(CPU_HZ * 0.3, null, Infinity);
+  check('mini-boot counts a press and toggles the LED', Buffer.from(m.tx).toString() === 'BOOT pressed: 1\n' && ((m.levels() >> 8) & 1) === 0,
+    JSON.stringify(Buffer.from(m.tx).toString()));
+
+  m = exampleMachine('usb-echo');
+  m.run(2e5, null, Infinity);
+  m.uartReceive([...Buffer.from('hi!\n')]);
+  m.run(4e5, null, Infinity);
+  check('usb-echo over the USB-Serial-JTAG model', Buffer.from(m.tx).toString().endsWith('Type something:\nHI!\n'), JSON.stringify(Buffer.from(m.tx).toString()));
+}
+
+// ---- boards: every header GPIO is listed once, and the wireable GPIOs are exactly those
+{
+  const { BOARDS } = require('../js/boards.js');
+  for (const [id, b] of Object.entries(BOARDS)) {
+    const header = b.left.concat(b.right).filter(l => /^\d+$/.test(l)).map(Number);
+    const ok = header.length === new Set(header).size && JSON.stringify([...header].sort((x, y) => x - y)) === JSON.stringify([...b.gpios].sort((x, y) => x - y));
+    check(`board ${id} pin list`, ok, JSON.stringify(header));
+  }
+  const mini = BOARDS.supermini;
+  check('SuperMini pinout (USB-C up)', mini.left.join() === '5,6,7,8,9,10,20,21' && mini.right.join() === '5V,GND,3V3,4,3,2,1,0', mini.left.join() + ' | ' + mini.right.join());
+}
+
+// ---- hardware build: Espressif image layout, checksum and SHA-256
+{
+  const Firmware = require('../js/firmware.js');
+  const crypto = require('crypto');
+  for (const ex of EXAMPLES) {
+    const fw = Firmware.buildFirmware(RVAsm.assemble(ex.code));
+    const img = Buffer.from(fw.image), body = img.subarray(0, img.length - 32);
+    let chk = 0xEF, off = 24;
+    for (let i = 0; i < img[1]; i++) {
+      const len = img.readUInt32LE(off + 4);
+      for (const b of img.subarray(off + 8, off + 8 + len)) chk ^= b;
+      off += 8 + len;
+    }
+    const ok = img[0] === 0xE9 && img[1] === fw.segments.length && img.readUInt16LE(12) === 5 && img[23] === 1 &&
+      body.length % 16 === 0 && body[body.length - 1] === chk &&
+      crypto.createHash('sha256').update(body).digest().equals(img.subarray(img.length - 32)) &&
+      img.readUInt32LE(4) === fw.entry && fw.entry >= fw.runtime.base && fw.entry < fw.runtime.base + fw.runtime.size &&
+      fw.runtime.base % 256 === 0;
+    check(`firmware image ${ex.id}`, ok, `${img.length} bytes, entry ${hex(fw.entry)}`);
+  }
+  let err = '';
+  try { Firmware.buildFirmware(RVAsm.assemble('main: j main\n.data\n.space 0x3A000\n')); } catch (e) { err = e.message; }
+  check('firmware rejects .data that reaches the stack', /stack/.test(err), err);
 }
 
 // ---- breakpoints

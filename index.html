@@ -62,6 +62,25 @@
       </select>
     </div>
 
+    <div class="tb-group hw-controls">
+      <div class="menu">
+        <button type="button" id="btnHw" title="Build the program for a real ESP32-C3 and run it on a board connected over USB">⚡ Hardware ▾</button>
+        <div class="menu-list wide" id="hwMenu">
+          <div class="menu-head" title="Browsers don't tell web pages the COM / tty name of a port, only the USB chip behind it. The browser's own port list shows the names.">Serial port</div>
+          <div id="hwPorts"></div>
+          <button type="button" id="hwPickPort"><b>Choose another port…</b><span>Opens the browser's port list, which shows the COM names</span></button>
+          <button type="button" id="hwForget"><b>Forget this port</b><span>Remove this page's permission to use the selected port</span></button>
+          <div class="menu-sep"></div>
+          <button type="button" id="hwRam"><b>Run on board (RAM)</b><span>Load into SRAM over USB and start it. Fast; lost when the board resets.</span></button>
+          <button type="button" id="hwFlash"><b>Flash to board</b><span>Write to flash at 0x0. The program runs at every power-up.</span></button>
+          <button type="button" id="hwBin"><b>Download firmware (.bin)</b><span>Flash it yourself: esptool.py --chip esp32c3 write_flash 0x0 firmware.bin</span></button>
+          <button type="button" id="hwReset"><b>Reset board</b><span>Restart the board and show its output</span></button>
+          <button type="button" id="hwDisconnect"><b>Disconnect</b><span>Release the serial port</span></button>
+        </div>
+      </div>
+      <span class="hw-state" id="hwState"></span>
+    </div>
+
     <div class="status" id="status"></div>
   </header>
 
@@ -88,6 +107,7 @@
     <section class="pane right-pane">
       <div class="stage-wrap">
         <div class="stage-toolbar">
+          <select id="boardSel" title="Development board shown on the breadboard (pin layout, on-board LED and buttons)"></select>
           <span class="dim">Add part:</span>
           <button type="button" data-add="led"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 9V6a4 4 0 0 1 8 0v3z" fill="#ff3b30"/><path d="M6 9v6M10 9v4" stroke="currentColor"/></svg>LED</button>
           <button type="button" data-add="button"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1.5" y="1.5" width="13" height="13" rx="2" fill="none" stroke="currentColor"/><circle cx="8" cy="8" r="4" fill="#e5383b"/></svg>Button</button>
@@ -125,7 +145,7 @@
           <section id="tab-serial" class="serial">
             <pre id="serialOut"></pre>
             <form id="serialForm" autocomplete="off">
-              <input id="serialIn" placeholder="Send text to UART0 RX…">
+              <input id="serialIn" placeholder="Send text to the program (UART0 / USB RX)…">
               <select id="serialEol" title="Line ending">
                 <option value="lf">LF</option>
                 <option value="crlf">CR+LF</option>
@@ -174,7 +194,7 @@
 
           <section id="tab-listing" hidden>
             <table class="grid listing">
-              <thead><tr><th>Address</th><th>Machine code</th><th>Line</th><th>Source</th></tr></thead>
+              <thead><tr><th>Address</th><th>Machine code</th><th title="The base instruction actually encoded: a pseudo-instruction expands to one or more of these">Basic</th><th>Line</th><th>Source</th></tr></thead>
               <tbody id="listBody"></tbody>
             </table>
             <div class="symlist mono" id="symList"></div>
@@ -222,8 +242,8 @@
               <tr><td class="mono">8</td><td>FUN_WPU</td><td>Internal pull-up</td></tr>
               <tr><td class="mono">7</td><td>FUN_WPD</td><td>Internal pull-down</td></tr>
             </table>
-            <p>A button only connects its pin to GND (or 3V3) while pressed. When released the pin is <b>floating</b> unless a pull resistor is enabled, so set <code>FUN_IE | FUN_WPU</code> for a button to GND (or <code>FUN_IE | FUN_WPD</code> for a button to 3V3). Reading a floating pin or a pin with <code>FUN_IE</code> = 0 prints a warning in the serial monitor. Reset values follow the "After Reset" column of the datasheet's pin table: GPIO2–5, 7, 8 and 10 have IE = 1 and no pull; GPIO6 (MTCK), GPIO9 and GPIO12–17, 20 have IE = 1 and a pull-up; GPIO21 (U0TXD) has a pull-up only; GPIO0/1, 11, 18, 19 have IE = 0. GPIO19 (USB D+) is also pulled up by the USB PHY.</p>
-            <p>After reset <code>MCU_SEL</code> = 0 on every pin, and function 0 is not GPIO on all of them:</p>
+            <p>A button only connects its pin to GND (or 3V3) while pressed. When released the pin is <b>floating</b> unless a pull resistor is enabled, so set <code>FUN_IE | FUN_WPU</code> for a button to GND (or <code>FUN_IE | FUN_WPD</code> for a button to 3V3). Reading a floating pin or a pin with <code>FUN_IE</code> = 0 prints a warning in the serial monitor. Reset values are the ones a real ESP32-C3 shows when the ROM has booted a program from flash: GPIO2–8 and 10 have IE = 1 and no pull; GPIO9, 12–17, 20 and 21 have IE = 1 and a pull-up; GPIO0/1, 11, 18, 19 have IE = 0. GPIO19 (USB D+) is also pulled up by the USB PHY.</p>
+            <p>After reset <code>MCU_SEL</code> = 0 (GPIO12/13: 1, set by the ROM's DIO flash setup), and function 0 is not GPIO on every pin:</p>
             <table class="grid">
               <tr><th>Pins</th><th>Function 0</th><th>To use as GPIO output</th></tr>
               <tr><td>GPIO0–3, 8–11, 18, 19</td><td>GPIO<i>n</i></td><td>works directly</td></tr>
@@ -248,8 +268,16 @@
               <tr><td class="mono">0x1C</td><td>UART_STATUS_REG</td><td>bits [9:0] RXFIFO_CNT, bits [25:16] TXFIFO_CNT (always 0)</td></tr>
             </table>
 
-            <h3>Simulator ecall services</h3>
-            <p>Simulator-only conveniences (like RARS/Venus) — real hardware has no OS to answer them. Put the service number in <code>a7</code>, the argument in <code>a0</code>.</p>
+            <h3>USB-Serial-JTAG (base 0x60043000)</h3>
+            <p>The chip's own USB serial port (the USB-C connector of the SuperMini). The serial monitor's input reaches both this port and UART0.</p>
+            <table class="grid">
+              <tr><th>Offset</th><th>Name</th><th>Description</th></tr>
+              <tr><td class="mono">0x00</td><td>EP1_REG</td><td>Write: queue a byte to send · Read: next received byte</td></tr>
+              <tr><td class="mono">0x04</td><td>EP1_CONF_REG</td><td>bit 0 WR_DONE (write 1: send the queued bytes now; needed on real hardware), bit 1 IN_EP_DATA_FREE (room to queue), bit 2 OUT_EP_DATA_AVAIL (a byte was received)</td></tr>
+            </table>
+
+            <h3>ecall services</h3>
+            <p>Conveniences like RARS/Venus. Put the service number in <code>a7</code>, the argument in <code>a0</code>. Real hardware has no OS to answer an <code>ecall</code>; the <b>Hardware</b> build adds a small runtime that implements these services over USB-Serial-JTAG and UART0.</p>
             <table class="grid">
               <tr><th>a7</th><th>Service</th><th>a7</th><th>Service</th></tr>
               <tr><td>1</td><td>print int a0</td><td>32</td><td>sleep a0 milliseconds</td></tr>
@@ -266,8 +294,24 @@
             <b>Expressions:</b> <code>+ - * / % &lt;&lt; &gt;&gt; &amp; | ^ ~</code>, parentheses, <code>'c'</code> characters, <code>0x</code>/<code>0b</code> numbers, <code>%hi(sym)</code>/<code>%lo(sym)</code>.<br>
             <b>Labels:</b> <code>name:</code> and numeric local labels (<code>1:</code> referenced as <code>1b</code> / <code>1f</code>). Comments start with <code>#</code>, <code>//</code> or <code>;</code>, or use <code>/* … */</code>.</p>
 
-            <h3>Board pins (ESP32-C3-DevKitM-1)</h3>
-            <p>Usable GPIOs: 0–10 and 18–21. GPIO9 is the on-board <b>BOOT</b> button (active low). GPIO20/21 are UART0 RX/TX, GPIO18/19 USB. The <b>RST</b> button restarts the program.</p>
+            <h3>Boards</h3>
+            <p>Pick the board above the breadboard. Wires to GPIOs the new board doesn't have are removed.</p>
+            <table class="grid">
+              <tr><th>Board</th><th>GPIOs on the headers</th><th>On the board</th></tr>
+              <tr><td>ESP32-C3-DevKitM-1</td><td>0–10, 18–21</td><td>BOOT button (GPIO9, active low), RST, USB-UART bridge on UART0. The RGB LED on GPIO8 is not modelled.</td></tr>
+              <tr><td>ESP32-C3 SuperMini</td><td>0–10, 20, 21 (USB-C up: left IO5–IO10, IO20, IO21; right 5V, GND, 3V3, IO4–IO0)</td><td>Blue LED on GPIO8 (lit when the pin is LOW), BOOT (GPIO9), RST, USB-C = the chip's USB-Serial-JTAG (GPIO18/19)</td></tr>
+            </table>
+
+            <h3>Running on a real board</h3>
+            <p>Connect the board over USB and use the <b>⚡ Hardware</b> menu (Chrome or Edge on a desktop, page opened from <code>https://</code> or <code>localhost</code>; other browsers can only download the .bin):</p>
+            <ul>
+              <li><b>Run on board (RAM)</b> resets the board into its ROM bootloader, loads the program into SRAM and starts it. Nothing is written to flash.</li>
+              <li><b>Flash to board</b> writes a firmware image at flash offset 0x0 and restarts the board, so the program runs at every power-up (it replaces whatever was in flash).</li>
+              <li><b>Download firmware (.bin)</b> saves the image for <code>esptool.py --chip esp32c3 write_flash 0x0 firmware.bin</code>.</li>
+            </ul>
+            <p><b>Serial port:</b> the top of the menu lists the ports this page may use and marks the one in use (also shown next to the menu). Browsers don't tell web pages a port's COM / tty name, so ports are named after their USB chip (e.g. <i>ESP32 USB-Serial-JTAG (303a:1001)</i> for the SuperMini, <i>CP210x USB-UART</i> for the DevKitM-1). <b>Choose another port…</b> opens the browser's own list, which does show the COM names; <b>Forget this port</b> removes the permission.</p>
+            <p>The program keeps the simulator's addresses (code at 0x40380000, data at 0x3FCA0000). A runtime added in front of it turns off the watchdogs, sets <code>sp</code> (0x3FCDA000) and <code>gp</code>, answers the <code>ecall</code> services, and prints <code>mcause</code> / <code>mepc</code> / <code>mtval</code> if the program crashes. While it runs, the serial monitor shows the board's output (including the ROM boot messages) and sends what you type to the board. If the board doesn't answer, hold <b>BOOT</b>, press <b>RST</b>, release <b>BOOT</b> and try again.</p>
+            <p>Differences on the real chip: the CPU runs at <b>20 MHz</b> (the simulator: 160 MHz), so time delays with SYSTIMER rather than instruction loops. The ESP32-C3 has no <code>cycle</code> / <code>time</code> / <code>instret</code> CSRs; the runtime emulates them with the chip's cycle counter (CSR 0x7E2, upper halves read 0). On the SuperMini, UART0 is on GPIO20/21, not on the USB-C port.</p>
 
             <h3>Keyboard</h3>
             <p><kbd>F5</kbd> run/pause · <kbd>F10</kbd> step · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> restart · <kbd>Ctrl</kbd>+<kbd>S</kbd> save in browser · <kbd>Del</kbd> delete selected part/wire · <kbd>Esc</kbd> cancel wiring. Buttons can be given a keyboard key in their settings.</p>
@@ -277,11 +321,20 @@
     </section>
   </main>
 
+  <div class="hw-progress" id="hwProgress" role="status" aria-live="polite" hidden>
+    <div class="hp-head"><b id="hpTitle"></b><span class="spacer"></span><button type="button" class="icon" id="hpClose" title="Close" aria-label="Close">×</button></div>
+    <ol class="hp-steps" id="hpSteps"></ol>
+    <div class="hp-barrow"><div class="hp-bar"><div id="hpFill"></div></div><span class="mono" id="hpPct"></span></div>
+    <div class="hp-detail" id="hpDetail"></div>
+  </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script src="js/assembler.js"></script>
   <script src="js/cpu.js"></script>
   <script src="js/esp32c3.js"></script>
+  <script src="js/firmware.js"></script>
+  <script src="js/flasher.js"></script>
+  <script src="js/boards.js"></script>
   <script src="js/components.js"></script>
   <script src="js/examples.js"></script>
   <script src="js/app.js"></script>

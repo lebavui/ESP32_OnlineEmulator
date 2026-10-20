@@ -29,13 +29,14 @@
   // IO_MUX_GPIOn_REG bits that the simulator models
   const FUN_WPD = 1 << 7, FUN_WPU = 1 << 8, FUN_IE = 1 << 9;
   const MCU_SEL_SHIFT = 12;           // MCU_SEL = bits 14:12, selects IO MUX function 0..2
-  // Reset values, from the "After Reset" column of datasheet Table 2-1 (Pin Overview):
-  // FUN_DRV = 2 (0x800) everywhere, plus IE (0x200) and pull-up (0x100) or pull-down (0x080).
-  // MCU_SEL = 0 (function 0) everywhere.
+  // Values a program sees when it starts, read back on a real ESP32-C3 after the ROM booted it
+  // from flash (they match the datasheet's Table 2-1 "After Reset" column except GPIO6, which
+  // has no pull-up, GPIO12/13, which the ROM's DIO flash setup switches to function 1, and
+  // GPIO18/19/21). FUN_DRV = 2 (0x800) or 3 (0xC00), IE = 0x200, WPU = 0x100, MCU_SEL = 0x1000.
   const IOMUX_RESET = [
-    0x800, 0x800, 0xA00, 0xA00, 0xA00, 0xA00, 0xB00, 0xA00,   // GPIO0..7  (0, 1: XTAL_32K, input off; 6: MTCK, IE + WPU while EFUSE_DIS_PAD_JTAG = 0)
-    0xA00, 0xB00, 0xA00, 0x800, 0xB00, 0xB00, 0xB00, 0xB00,   // GPIO8..15 (9: BOOT strapping, pulled up)
-    0xB00, 0xB00, 0x800, 0x800, 0xB00, 0x900                  // GPIO16..21 (18, 19: USB; 20: U0RXD; 21: U0TXD, WPU)
+    0x800, 0x800, 0xA00, 0xA00, 0xA00, 0xA00, 0xA00, 0xA00,     // GPIO0..7  (0, 1: XTAL_32K, input off)
+    0xA00, 0xB00, 0xA00, 0x800, 0x1B00, 0x1B00, 0xB00, 0xB00,   // GPIO8..15 (9: BOOT strapping, pulled up; 11..17: flash)
+    0xB00, 0xB00, 0xC00, 0xC00, 0xB00, 0xB00                    // GPIO16..21 (18, 19: USB; 20: U0RXD; 21: U0TXD)
   ];
   // IO MUX functions F0, F1, F2 of each pin (datasheet Table 2-3). F1 is always GPIOn.
   const IOMUX_FUNCS = [
@@ -186,7 +187,9 @@
         case SYSTIMER + 0x44: return this.st0Lo;
         case SYSTIMER + 0x48: return this.st1Hi;
         case SYSTIMER + 0x4C: return this.st1Lo;
-        case USB_SERIAL + 0x04: return 0x2;  // SERIAL_IN_EP_DATA_FREE
+        // EP1 FIFO / EP1_CONF: received bytes share the serial monitor's input queue with UART0
+        case USB_SERIAL + 0x00: return this.uartRx.length ? this.uartRx.shift() : 0;
+        case USB_SERIAL + 0x04: return 0x2 | (this.uartRx.length ? 0x4 : 0);  // IN_EP_DATA_FREE, OUT_EP_DATA_AVAIL
         default:
           if (addr >= IO_MUX + 4 && addr < IO_MUX + 4 + 4 * GPIO_COUNT) return this.iomux[(addr - IO_MUX - 4) >> 2];
           return this.periph.get(addr) | 0;
