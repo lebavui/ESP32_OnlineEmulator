@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  const { RVAsm, ESP32C3, PARTS, EXAMPLES, BLANK, BOARDS, DEFAULT_BOARD, Firmware, Flasher } = window;
+  const { RVAsm, ESP32C3, PARTS, EXAMPLES, BLANK, BOARDS, DEFAULT_BOARD, Firmware, Flasher, MAX7219Chain } = window;
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -22,6 +22,7 @@
 
   const machine = new ESP32C3();
   let comps = [];
+  const devices = new Map();   // part id -> chip model (MAX7219Chain) of parts with a serial interface
   let breakpointLines = new Set();
   let program = null;          // last successfully assembled program
   let loadedSource = null;     // source text currently loaded in the machine
@@ -286,6 +287,7 @@
     if (!res) return false;
     try {
       machine.load(res);
+      resetDevices();
     } catch (e) {
       toast(e.message, 'error');
       return false;
@@ -332,6 +334,7 @@
   function stop() {
     simState = 'stopped';
     machine.reset();
+    resetDevices();
     applyInputs();
     setCurrentLine(0);
     updateControls();
@@ -475,6 +478,32 @@
 
   // ================================================================ inputs (buttons / switches)
 
+  // Chip models of parts that read a serial stream (MAX7219 matrices). The machine calls
+  // onPinsChanged at the instruction that changes a pin, so bit-banged clock edges are never
+  // missed. Power-up state: an unpowered part is reset, and resetting the simulation resets them.
+  function syncDevices() {
+    const lv = machine.levels(), feeds = [];
+    for (const id of [...devices.keys()]) if (!comps.some(c => c.id === id && c.type === 'matrix')) devices.delete(id);
+    for (const c of comps) {
+      if (c.type !== 'matrix') continue;
+      const n = +c.props.modules || 1;
+      let d = devices.get(c.id);
+      if (!d || d.chips.length !== n) { d = new MAX7219Chain(n); devices.set(c.id, d); }
+      if (!isPowered(c)) { d.reset(); continue; }
+      const { DIN, CS, CLK } = c.conn;
+      if ([DIN, CS, CLK].some(g => g === undefined || g === null)) continue;
+      d.clk = (lv >>> CLK) & 1;                       // edges count from the current levels on
+      d.cs = (lv >>> CS) & 1;
+      feeds.push(l => d.input((l >>> DIN) & 1, (l >>> CS) & 1, (l >>> CLK) & 1));
+    }
+    machine.onPinsChanged = feeds.length ? l => { for (const f of feeds) f(l); } : null;
+  }
+
+  function resetDevices() {
+    for (const d of devices.values()) d.reset();
+    syncDevices();
+  }
+
   // Buttons and switches only connect a pin to GND or 3V3. A released button leaves its pin
   // floating, so the program needs a pull-up / pull-down (FUN_WPU / FUN_WPD in IO_MUX).
   function applyInputs() {
@@ -614,6 +643,7 @@
         if (c.route) delete c.route[pin];             // routes were drawn for the old pin positions
       }
     });
+    resetDevices();
     renderStage();
     applyInputs();
     requestAnimationFrame(fitView);
@@ -621,10 +651,13 @@
     if (dropped.length) toast(`${BOARD.name} has no pin for: ${dropped.join(', ')} (disconnected)`, 'error');
     else toast(`Board: ${BOARD.name}`, 'ok');
   }
-  const POWER_COLORS = { GND: '#6b7280', '3V3': '#ff453a' };
+  const POWER_COLORS = { GND: '#6b7280', '3V3': '#ff453a', '5V': '#ff9f0a' };
 
   const hasConn = (c, pin) => c.conn[pin] !== undefined && c.conn[pin] !== null;
   const powerPins = def => def.power || [];
+  const supplies = def => def.supplies || ['GND', '3V3'];
+  const supplyText = def => supplies(def).join(', ').replace(/, ([^,]*)$/, ' or $1');
+  const partSize = c => PARTS[c.type].size ? PARTS[c.type].size(c) : PARTS[c.type];
   const findPin = (def, name) => def.pins.find(p => p.name === name) || powerPins(def).find(p => p.name === name);
   const isPowerPin = (def, name) => powerPins(def).some(p => p.name === name);
   const pinLabelOf = (def, c, p) => def.pinLabel ? def.pinLabel(c, p) : p.label;
@@ -718,14 +751,14 @@
 
   function renderComponents() {
     compLayer.innerHTML = comps.map(c => {
-      const def = PARTS[c.type];
+      const def = PARTS[c.type], size = partSize(c);
       const sel = selection && selection.kind === 'comp' && selection.id === c.id;
       const pins = def.pins.concat(autoPower ? [] : powerPins(def)).map(p => {
         const g = c.conn[p.name];
         const conn = g !== undefined && g !== null;
         const pwr = isPowerPin(def, p.name);
         const label = pinLabelOf(def, c, p) + (pwr ? ' → ' + def.rail(c, p.name) : '');
-        const hint = pwr ? ' — click, then click a GND or 3V3 pin on the board' : ' — click, then click a GPIO pin on the board';
+        const hint = pwr ? ` — click, then click a ${supplyText(def)} pin on the board` : ' — click, then click a GPIO pin on the board';
         // With powerAny, one wired supply pin is enough, so don't nag about the other one.
         const ok = conn || (pwr && def.powerAny && isPowered(c));
         return `<g class="cpin${ok ? ' connected' : ''}${pwr ? ' pwr' : ''}" data-comp="${c.id}" data-pin="${p.name}" transform="translate(${p.x} ${p.y})">
@@ -734,10 +767,10 @@
           </g>`;
       }).join('');
       return `<g class="comp${sel ? ' selected' : ''}" data-id="${c.id}" transform="translate(${c.x} ${c.y})">
-          <rect class="sel-box" x="-8" y="-14" width="${def.w + 16}" height="${def.h + 22}" rx="6"/>
+          <rect class="sel-box" x="-8" y="-14" width="${size.w + 16}" height="${size.h + 22}" rx="6"/>
           <g class="body">${def.render(c, { auto: autoPower })}</g>
           ${pins}
-          <text class="comp-label" x="${def.w / 2}" y="${def.h + 20}" text-anchor="middle">${esc(c.id)}</text>
+          <text class="comp-label" x="${size.w / 2}" y="${size.h + 20}" text-anchor="middle">${esc(c.id)}</text>
         </g>`;
     }).join('');
     compEls = new Map();
@@ -978,7 +1011,7 @@
     if (!r.width || !r.height) return;
     let x0 = -10, y0 = -10, x1 = BOARD.w + 10, y1 = BOARD.h + 30;
     for (const c of comps) {
-      const d = PARTS[c.type];
+      const d = partSize(c);
       x0 = Math.min(x0, c.x - 20); y0 = Math.min(y0, c.y - 30);
       x1 = Math.max(x1, c.x + d.w + 20); y1 = Math.max(y1, c.y + d.h + 40);
     }
@@ -999,7 +1032,8 @@
       const ctx = {
         duty: pin => { const g = c.conn[pin]; return g === undefined || g === null ? null : duty[g]; },
         driven: pin => { const g = c.conn[pin]; return g !== undefined && g !== null && ((enable >>> g) & 1) === 1; },
-        powered: isPowered(c)
+        powered: isPowered(c),
+        device: devices.get(c.id) || null
       };
       PARTS[c.type].update(el, c, ctx);
     }
@@ -1069,11 +1103,11 @@
       `<label><span>${esc(pinLabelOf(def, c, p))}</span><select data-pinsel="${p.name}">${gpioOptions(c.conn[p.name])}</select></label>`).join('');
     const power = autoPower ? '' : powerPins(def).map(p => {
       const cur = POWER_PINS[c.conn[p.name]] || '';
-      const options = [['', '— not connected —'], ['GND', 'GND'], ['3V3', '3V3']].map(([v, t]) =>
+      const options = [['', '— not connected —']].concat(supplies(def).map(r => [r, r])).map(([v, t]) =>
         `<option value="${v}"${cur === v ? ' selected' : ''}>${t}</option>`).join('');
       return `<label><span>${esc(pinLabelOf(def, c, p))} (power)</span><select data-pwrsel="${p.name}">${options}</select></label>`;
     }).join('');
-    const warn = isPowered(c) ? '' : `<p class="insp-warn">No power: wire ${def.powerAny ? 'a' : 'the'} supply pin to GND or 3V3.</p>`;
+    const warn = isPowered(c) ? '' : `<p class="insp-warn">No power: wire ${def.powerAny ? 'a' : 'the'} supply pin${def.powerAny || powerPins(def).length < 2 ? '' : 's'} to ${supplyText(def)}.</p>`;
     box.innerHTML = `
       <div class="insp-head"><b>${esc(def.title)}</b><span class="dim">${esc(c.id)}</span><button class="icon" data-act="close" title="Close">✕</button></div>
       ${props}
@@ -1146,6 +1180,7 @@
   });
 
   function afterPartsChanged(keepInspector) {
+    syncDevices();
     renderComponents();
     renderWires();
     if (!keepInspector) renderInspector();
@@ -1177,7 +1212,7 @@
     const r = svg.getBoundingClientRect();
     const visRight = r.width - 300; // keep clear of the inspector panel
     const overlaps = (x, y) => comps.some(c => {
-      const d = PARTS[c.type];
+      const d = partSize(c);
       return x < c.x + d.w + 30 && x + def.w + 30 > c.x && y < c.y + d.h + 40 && y + def.h + 40 > c.y;
     });
     const onScreen = (x, y) => {
@@ -1200,7 +1235,7 @@
   function addPart(type) {
     const def = PARTS[type];
     let n = 1;
-    const prefix = { led: 'led', button: 'btn', switch: 'sw', sevenseg: 'seg' }[type];
+    const prefix = { led: 'led', button: 'btn', switch: 'sw', sevenseg: 'seg', matrix: 'mx' }[type];
     while (compById(prefix + n)) n++;
     const spot = findFreeSpot(def);
     const c = {
@@ -1260,7 +1295,11 @@
     }
     cancelPending();
     if (pwr !== (typeof target === 'string')) {
-      toast(pwr ? `${id}.${pin} is a supply pin: connect it to GND or 3V3.` : `${id}.${pin} is a signal pin: connect it to a GPIO pin.`, 'error');
+      toast(pwr ? `${id}.${pin} is a supply pin: connect it to ${supplyText(PARTS[c.type])}.` : `${id}.${pin} is a signal pin: connect it to a GPIO pin.`, 'error');
+      return;
+    }
+    if (pwr && !supplies(PARTS[c.type]).includes(POWER_PINS[target])) {
+      toast(`${POWER_PINS[target]}: ${id} runs from 3.3 V. Use a ${supplyText(PARTS[c.type])} pin.`, 'error');
       return;
     }
     let dropped = [];
@@ -1280,14 +1319,13 @@
   function onCompPinClick(id, pin) {
     if (pending && pending.kind === 'board') { connect(id, pin, pending.key !== undefined ? pending.key : pending.gpio); return; }
     const pwr = isPowerPin(PARTS[compById(id).type], pin);
-    startPending({ kind: 'comp', id, pin }, `Wiring ${id}.${pin}: click a ${pwr ? 'GND or 3V3' : 'GPIO'} pin on the board`);
+    startPending({ kind: 'comp', id, pin }, `Wiring ${id}.${pin}: click a ${pwr ? supplyText(PARTS[compById(id).type]) : 'GPIO'} pin on the board`);
   }
 
   function onBoardPinClick(label) {
     if (POWER_PINS[label]) {
       const rail = POWER_PINS[label];
-      if (autoPower) { toast(`${rail}: power is connected automatically. Turn Auto power off to wire it yourself.`); return; }
-      if (rail === '5V') { toast('5V: the parts here run from 3.3 V. Use a 3V3 pin.', 'error'); return; }
+      if (autoPower) { toast(`${rail}: power is connected automatically. Set Power supply to Manual in ⚙ Settings to wire it yourself.`); return; }
       if (pending && pending.kind === 'comp') { connect(pending.id, pending.pin, label); return; }
       startPending({ kind: 'board', key: label }, `Wiring ${rail}: click a supply pin on a part`);
       return;
@@ -1298,40 +1336,53 @@
     startPending({ kind: 'board', gpio }, `Wiring GPIO${gpio}: click a pin on a part`);
   }
 
+  // ---- settings dialog: power supply (auto / manual) and wire style; both are project settings
+  const settingsForm = $('#settingsForm');
+
   function setWireStyle(style) {
     wireStyle = style === 'ortho' ? 'ortho' : 'curve';
-    $('#wireStyle').value = wireStyle;
+    settingsForm.elements.wires.value = wireStyle;
   }
-
-  $('#wireStyle').addEventListener('change', e => {
-    cancelPending();
-    setWireStyle(e.target.value);
-    renderWires();
-    renderInspector();
-    scheduleSave();
-    if (wireStyle === 'ortho') toast('Horizontal / vertical wires: while wiring, click to place points; the wire bends along the way you first move the mouse. Backspace undoes a point.');
-  });
 
   function setAutoPower(on) {
     autoPower = on;
-    const b = $('#autoPower');
-    b.setAttribute('aria-pressed', String(on));
-    b.querySelector('b').textContent = on ? 'ON' : 'OFF';
+    settingsForm.elements.power.value = on ? 'auto' : 'manual';
+    $('#powerBadge').hidden = on;
     svg.classList.toggle('manual-power', !on);
+    updatePowerNote();
   }
 
-  $('#autoPower').addEventListener('click', () => {
-    cancelPending();
-    setAutoPower(!autoPower);
-    if (selection && selection.kind === 'wire') {
-      const c = compById(selection.id);
-      if (!c || isPowerPin(PARTS[c.type], selection.pin)) selection = null;
-    }
-    afterPartsChanged();
+  function updatePowerNote() {
     const unpowered = comps.filter(c => !isPowered(c)).length;
-    toast(autoPower ? 'Auto power ON: GND / 3V3 are connected automatically.'
-      : `Auto power OFF: wire each part's supply pin to GND or 3V3 on the board${unpowered ? ` (${unpowered} part${unpowered > 1 ? 's' : ''} unpowered)` : ''}.`);
+    $('#powerNote').hidden = autoPower || !unpowered;
+    $('#powerNote').textContent = `${unpowered} part${unpowered > 1 ? 's are' : ' is'} not powered yet: wire ${unpowered > 1 ? 'their' : 'its'} supply pin(s) to GND or 3V3.`;
+  }
+
+  $('#btnSettings').addEventListener('click', () => {
+    cancelPending();
+    updatePowerNote();
+    $('#settingsDlg').showModal();
   });
+
+  settingsForm.addEventListener('change', e => {
+    if (e.target.name === 'wires') {
+      setWireStyle(e.target.value);
+      renderWires();
+      renderInspector();
+      scheduleSave();
+    } else if (e.target.name === 'power') {
+      setAutoPower(e.target.value === 'auto');
+      if (selection && selection.kind === 'wire') {
+        const c = compById(selection.id);
+        if (!c || isPowerPin(PARTS[c.type], selection.pin)) selection = null;
+      }
+      afterPartsChanged();
+      updatePowerNote();
+    }
+  });
+
+  // Clicking the backdrop closes the dialog.
+  $('#settingsDlg').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 
   // ---- pointer interaction
   let drag = null;
@@ -1492,8 +1543,10 @@
     if (e.key === 'F5') { e.preventDefault(); if (simState === 'running') pause(); else run(); return; }
     if (e.key === 'F10') { e.preventDefault(); step(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveLocal(); toast('Project saved in this browser', 'ok'); return; }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b') { e.preventDefault(); showCode(!codeShown()); saveLayout(); return; }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'j') { e.preventDefault(); showPanels(!panelsShown()); saveLayout(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); if (simState === 'running') stop(); run(); return; }
-    if (e.target.closest('input, textarea, select')) return;
+    if (e.target.closest('input, textarea, select, dialog')) return;
     if (e.key === 'Escape') { cancelPending(); select(null); return; }
     if (e.key === 'Backspace' && pending) {
       e.preventDefault();
@@ -1547,6 +1600,7 @@
     if (serialTail.data.length > 200000) serialTail.data = serialTail.data.slice(-150000);
     if (stick) serialOut.scrollTop = serialOut.scrollHeight;
     if (activeTab !== 'serial') $('[data-tab="serial"]').classList.add('badge');
+    if (!panelsShown()) $('#btnPanels').classList.add('badge');
   }
 
   function clearSerial() {
@@ -1588,6 +1642,7 @@
     msgList.appendChild(row);
     if (stick) msgList.scrollTop = msgList.scrollHeight;
     if (activeTab !== 'messages' && level !== 'info') { msgUnseen++; msgCount.textContent = msgUnseen; msgCount.hidden = false; }
+    if (!panelsShown() && level !== 'info') $('#btnPanels').classList.add('badge');
     updateMsgSummary();
   }
 
@@ -2085,7 +2140,7 @@ Serial port: ${portLabel(port)}` : '');
       }
       for (const p of powerPins(def)) {
         const k = c.conn && c.conn[p.name];
-        if (POWER_PINS[k] === 'GND' || POWER_PINS[k] === '3V3') conn[p.name] = k;
+        if (supplies(def).includes(POWER_PINS[k])) conn[p.name] = k;
       }
       const route = {};
       for (const pin of Object.keys(conn)) {
@@ -2127,6 +2182,7 @@ Serial port: ${portLabel(port)}` : '');
     currentLine = 0;
     ta.scrollTop = 0;
     renderEditor();
+    resetDevices();
     renderStage();
     applyInputs();
     const res = assembleNow(true);
@@ -2248,6 +2304,9 @@ Serial port: ${portLabel(port)}` : '');
 
   function splitter(el, onMove) {
     el.addEventListener('pointerdown', e => {
+      if (e.target.closest('.split-btn')) return;            // the collapse button, not a drag
+      if (el.id === 'splitV' ? !codeShown() : !panelsShown()) return;
+      if (matchMedia('(max-width: 900px)').matches) return;   // stacked layout: nothing to resize
       e.preventDefault();
       el.setPointerCapture(e.pointerId);
       el.classList.add('dragging');
@@ -2256,13 +2315,45 @@ Serial port: ${portLabel(port)}` : '');
         el.classList.remove('dragging');
         el.removeEventListener('pointermove', move);
         el.removeEventListener('pointerup', up);
-        try { localStorage.setItem(STORE_KEY + '-layout', JSON.stringify({ left: layout.style.getPropertyValue('--left'), bottom: layout.style.getPropertyValue('--bottom') })); } catch (_) { /* ignore */ }
+        saveLayout();
       };
       el.addEventListener('pointermove', move);
       el.addEventListener('pointerup', up);
     });
   }
   const layout = $('#layout');
+  function saveLayout() {
+    const l = {
+      left: layout.style.getPropertyValue('--left'), bottom: layout.style.getPropertyValue('--bottom'),
+      code: !layout.classList.contains('no-code'), panels: !layout.classList.contains('no-panels')
+    };
+    try { localStorage.setItem(STORE_KEY + '-layout', JSON.stringify(l)); } catch (_) { /* ignore */ }
+  }
+
+  // Show / hide the code editor (Ctrl+B) and the bottom panels (Ctrl+J).
+  function showCode(on) {
+    layout.classList.toggle('no-code', !on);
+    const b = $('#btnCode');
+    b.setAttribute('aria-pressed', String(on));
+    b.title = `${on ? 'Hide' : 'Show'} the code editor (Ctrl+B)`;
+    if (on) { renderEditor(); ta.focus({ preventScroll: true }); }
+  }
+  function showPanels(on) {
+    layout.classList.toggle('no-panels', !on);
+    const b = $('#btnPanels');
+    b.setAttribute('aria-pressed', String(on));
+    b.title = `${on ? 'Hide' : 'Show'} the bottom panels: serial monitor, messages, registers… (Ctrl+J)`;
+    if (on) {
+      b.classList.remove('badge');
+      serialOut.scrollTop = serialOut.scrollHeight;
+      updatePanels(true);
+    }
+  }
+  const codeShown = () => !layout.classList.contains('no-code');
+  const panelsShown = () => !layout.classList.contains('no-panels');
+  $('#btnCode').addEventListener('click', () => { showCode(!codeShown()); saveLayout(); });
+  $('#btnPanels').addEventListener('click', () => { showPanels(!panelsShown()); saveLayout(); });
+
   splitter($('#splitV'), e => {
     const r = layout.getBoundingClientRect();
     const px = Math.min(r.width - 360, Math.max(280, e.clientX - r.left));
@@ -2312,6 +2403,8 @@ Serial port: ${portLabel(port)}` : '');
       const l = JSON.parse(localStorage.getItem(STORE_KEY + '-layout') || 'null');
       if (l && l.left) layout.style.setProperty('--left', l.left);
       if (l && l.bottom) layout.style.setProperty('--bottom', l.bottom);
+      if (l && l.code === false) showCode(false);
+      if (l && l.panels === false) showPanels(false);
       const sp = localStorage.getItem(STORE_KEY + '-speed');
       if (sp && $(`#speedSel option[value="${sp}"]`)) $('#speedSel').value = sp;
     } catch (_) { /* ignore */ }

@@ -327,6 +327,47 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   check('usb-echo over the USB-Serial-JTAG model', Buffer.from(m.tx).toString().endsWith('Type something:\nHI!\n'), JSON.stringify(Buffer.from(m.tx).toString()));
 }
 
+// ---- MAX7219: serial protocol, registers, daisy chain, and the matrix example end to end
+{
+  const { MAX7219Chain } = require('../js/max7219.js');
+  const send = (chain, words) => {       // words[0] goes out first (ends up in the farthest chip)
+    chain.input(0, 1, 0);
+    chain.input(0, 0, 0);
+    for (const w of words) for (let b = 15; b >= 0; b--) { const d = (w >> b) & 1; chain.input(d, 0, 0); chain.input(d, 0, 1); }
+    chain.input(0, 0, 0);
+    chain.input(0, 1, 0);
+  };
+  const one = new MAX7219Chain(1);
+  send(one, [0x0181]);
+  check('MAX7219 starts in shutdown (blank)', one.chips[0].rows().every(r => r === 0) && one.chips[0].digits[0] === 0x81);
+  send(one, [0x0C01]); send(one, [0x0B07]); send(one, [0x0A0F]);
+  check('MAX7219 shows digit registers after leaving shutdown', one.chips[0].rows()[0] === 0x81 && one.chips[0].brightness() === 31 / 32);
+  send(one, [0x0B00]);
+  send(one, [0x0242]);
+  check('MAX7219 scan limit hides digits 1..7', one.chips[0].rows()[1] === 0 && one.chips[0].digits[1] === 0x42);
+  send(one, [0x0B07]); send(one, [0x0901]); send(one, [0x0185]);
+  check('MAX7219 code B decode on digit 0', one.chips[0].rows()[0] === (0x80 | 0x5B) && one.chips[0].rows()[1] === 0x42);
+  send(one, [0x0C00]); send(one, [0x0F01]);
+  check('MAX7219 display test lights everything, even in shutdown', one.chips[0].rows().every(r => r === 0xFF));
+
+  const four = new MAX7219Chain(4);
+  send(four, [0x0104, 0x0103, 0x0102, 0x0101]);
+  check('MAX7219 daisy chain: the first word reaches the last chip', four.chips.map(c => c.digits[0]).join() === '1,2,3,4', four.chips.map(c => c.digits[0]).join());
+  send(four, [0x0000, 0x0000, 0x0000, 0x01AA]);
+  check('MAX7219 no-op words leave the other chips alone', four.chips.map(c => c.digits[0]).join() === '170,2,3,4', four.chips.map(c => c.digits[0]).join());
+
+  const m = exampleMachine('matrix');
+  const mx = new MAX7219Chain(1);
+  m.onPinsChanged = l => mx.input((l >>> 2) & 1, (l >>> 3) & 1, (l >>> 10) & 1);
+  m.run(CPU_HZ * 0.1, null, Infinity);
+  const heart = [...mx.chips[0].rows()].join();
+  m.run(CPU_HZ * 0.8, null, Infinity);
+  const smiley = [...mx.chips[0].rows()].join();
+  check('matrix example draws a heart, then a smiley',
+    heart === '0,102,255,255,255,126,60,24' && smiley === '60,66,165,129,165,153,66,60' && Buffer.from(m.tx).toString() === 'heart\nsmiley\n',
+    heart + ' | ' + smiley);
+}
+
 // ---- boards: every header GPIO is listed once, and the wireable GPIOs are exactly those
 {
   const { BOARDS } = require('../js/boards.js');
@@ -337,6 +378,8 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   }
   const mini = BOARDS.supermini;
   check('SuperMini pinout (USB-C up)', mini.left.join() === '5,6,7,8,9,10,20,21' && mini.right.join() === '5V,GND,3V3,4,3,2,1,0', mini.left.join() + ' | ' + mini.right.join());
+  const xiao = BOARDS.xiaoc3;
+  check('XIAO ESP32C3 pinout (USB-C up, D0-D6 left, D10-D7 right)', xiao.left.join() === '2,3,4,5,6,7,21' && xiao.right.join() === '5V,GND,3V3,10,9,8,20', xiao.left.join() + ' | ' + xiao.right.join());
 }
 
 // ---- hardware build: Espressif image layout, checksum and SHA-256

@@ -3,14 +3,17 @@
  *
  * Each part definition provides:
  *   w, h                 size of the part in world units
+ *   size(c)              optional: { w, h } when the size depends on the part's settings
  *   pins                 signal pins that can be wired to a GPIO
  *   props                editable properties (shown in the inspector)
  *   render(c, o)         SVG markup (local coordinates); o.auto = power pins wired automatically
- *   update(el, c, ctx)   refresh visuals; ctx.duty(pinName) -> 0..1 or null, ctx.powered
+ *   update(el, c, ctx)   refresh visuals; ctx.duty(pinName) -> 0..1 or null, ctx.powered,
+ *                        ctx.device = the part's chip model, if it has one (see app.js syncDevices)
  *   pinLabel(c, p)       optional: pin label that depends on the part's settings
  *   power                supply pins (GND / 3V3); shown and wired by hand when auto power is off
  *   powerAny             true if any one supply pin is enough (they are joined inside the part)
- *   rail(c, pin)         rail ('GND' | '3V3') a supply pin needs with the current settings
+ *   supplies             optional: board rails the supply pins may use (default ['GND', '3V3'])
+ *   rail(c, pin)         rail ('GND' | '3V3' | '5V') a supply pin needs with the current settings
  *   setRail(c, pin, r)   change the settings so that supply pin belongs on rail r
  */
 (function (root) {
@@ -248,6 +251,76 @@
           s.setAttribute('opacity', (0.1 + 0.9 * d).toFixed(3));
           s.style.filter = d > 0.3 ? 'url(#segGlow)' : '';
         }
+      }
+    },
+
+    // 8x8 LED matrix module(s) driven by MAX7219 chips (js/max7219.js); with 4 modules the
+    // chips are daisy-chained left to right, the leftmost one is wired to the MCU.
+    // Digit register n (0..7) lights row n from the top; data bit D7 is the leftmost column.
+    matrix: {
+      title: 'LED matrix (MAX7219)',
+      w: 92, h: 124,
+      size: c => ({ w: 8 + 84 * (+c.props.modules || 1), h: 124 }),
+      pins: [
+        { name: 'DIN', label: 'DIN (data in)', x: 46, y: 124, dir: 'down' },
+        { name: 'CS', label: 'CS / LOAD', x: 64, y: 124, dir: 'down' },
+        { name: 'CLK', label: 'CLK', x: 82, y: 124, dir: 'down' }
+      ],
+      power: [
+        { name: 'VCC', label: 'VCC', x: 10, y: 124, dir: 'down' },
+        { name: 'GND', label: 'GND', x: 28, y: 124, dir: 'down' }
+      ],
+      supplies: ['GND', '3V3', '5V'],
+      rail: (c, pin) => pin === 'GND' ? 'GND' : c.props.vcc === '3V3' ? '3V3' : '5V',
+      setRail(c, pin, r) { if (pin === 'VCC' && r !== 'GND') c.props.vcc = r; },
+      defaults: { modules: '1', color: 'red', vcc: '5V' },
+      props: [
+        { key: 'modules', label: 'Modules', type: 'select', options: [['1', '1 (8×8)'], ['4', '4 chained (32×8)']] },
+        { key: 'color', label: 'Color', type: 'select', options: opts(['red', 'green', 'blue', 'yellow', 'white']) }
+      ],
+      render(c, o) {
+        const n = +c.props.modules || 1, col = LED_COLORS[c.props.color] || LED_COLORS.red;
+        const { w } = this.size(c);
+        let dots = '';
+        for (let m = 0; m < n; m++) {
+          const x0 = 4 + 84 * m;
+          dots += `<rect x="${x0 + 2}" y="4" width="80" height="80" rx="2" fill="#101114"/>`;
+          for (let r = 0; r < 8; r++) {
+            for (let k = 0; k < 8; k++) dots += `<circle class="dot" cx="${x0 + 7 + k * 10}" cy="${9 + r * 10}" r="3.8" fill="${col}" opacity="0.12"/>`;
+          }
+        }
+        const header = this.power.concat(this.pins).map(p => {
+          const leg = !o || o.auto ? this.pins.includes(p) : true;
+          return `${leg ? `<path d="M${p.x} 114 V124" class="leg"/>` : ''}
+            <rect x="${p.x - 3}" y="110" width="6" height="6" fill="#c9a74a"/>
+            <text x="${p.x}" y="106" class="tiny light" text-anchor="middle">${p.name}</text>`;
+        }).join('');
+        return `
+          <rect x="0" y="0" width="${w}" height="116" rx="3" fill="#1d5b8f" stroke="#123a5c" stroke-width="1.5"/>
+          ${dots}
+          <text x="${w / 2}" y="94" class="tiny light" text-anchor="middle">MAX7219${n > 1 ? ' ×' + n : ''}</text>
+          ${header}`;
+      },
+      update(el, c, ctx) {
+        const chain = ctx.powered ? ctx.device : null;
+        let key = '';
+        const levels = [];
+        const n = +c.props.modules || 1;
+        for (let m = 0; m < n; m++) {
+          const chip = chain && chain.chips[m];
+          const rows = chip ? chip.rows() : null;
+          const on = chip ? (0.35 + 0.65 * Math.sqrt(chip.brightness())).toFixed(2) : '0';
+          for (let r = 0; r < 8; r++) {
+            for (let k = 0; k < 8; k++) {
+              const v = rows && (rows[r] >> (7 - k)) & 1 ? on : '0.12';
+              levels.push(v);
+              key += v;
+            }
+          }
+        }
+        if (el._dots === key) return;                // nothing changed since the last frame
+        el._dots = key;
+        el.querySelectorAll('.dot').forEach((d, i) => d.setAttribute('opacity', levels[i]));
       }
     }
   };

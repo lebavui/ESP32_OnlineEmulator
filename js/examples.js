@@ -311,7 +311,7 @@ ${DELAY_MS}`,
     {
       id: 'uart',
       name: 'UART hello + echo',
-      description: 'Print a greeting through the UART0 FIFO register and echo what you type in the serial monitor. (On a SuperMini, UART0 is on GPIO20/21, not on USB: use the USB-Serial-JTAG example there.)',
+      description: 'Print a greeting through the UART0 FIFO register and echo what you type in the serial monitor. (On a SuperMini or XIAO ESP32C3, UART0 is on GPIO20/21, not on USB: use the USB-Serial-JTAG example there.)',
       code: `# ============================================================
 #  UART0: print a greeting, then echo every received character.
 #  Type in the Serial Monitor input box and press Enter.
@@ -633,6 +633,139 @@ usb_puts:
         ret
 `,
       components: []
+    },
+
+    {
+      id: 'matrix',
+      name: 'LED matrix (MAX7219)',
+      description: 'Bit-bang the MAX7219 serial interface (DIN, CS, CLK) to set up an 8×8 LED matrix module and alternate between two pictures.',
+      code: `# ============================================================
+#  8x8 LED matrix with a MAX7219 driver.
+#  Each transfer is 16 bits, MSB first: 4 don't-care bits, a
+#  4-bit register address, 8 data bits. The MAX7219 shifts DIN
+#  in on each rising edge of CLK and latches the word when CS
+#  goes high. Digit registers 1..8 hold rows 0..7 (top to
+#  bottom); bit 7 is the leftmost LED of a row.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT_W1TS,     0x08
+        .equ GPIO_OUT_W1TC,     0x0C
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ SYSTIMER_BASE,     0x60023000
+        .equ DIN_PIN,           2
+        .equ CS_PIN,            3
+        .equ CLK_PIN,           10
+
+        # MAX7219 registers
+        .equ REG_DECODE,        0x09
+        .equ REG_INTENSITY,     0x0A
+        .equ REG_SCAN_LIMIT,    0x0B
+        .equ REG_SHUTDOWN,      0x0C
+        .equ REG_TEST,          0x0F
+
+        .data
+heart:     .byte 0x00, 0x66, 0xFF, 0xFF, 0xFF, 0x7E, 0x3C, 0x18
+smiley:    .byte 0x3C, 0x42, 0xA5, 0x81, 0xA5, 0x99, 0x42, 0x3C
+msg_heart: .asciz "heart\\n"
+msg_smile: .asciz "smiley\\n"
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      t0, 1 << CS_PIN
+        sw      t0, GPIO_OUT_W1TS(s0)   # CS idles HIGH
+        li      t0, (1 << DIN_PIN) | (1 << CS_PIN) | (1 << CLK_PIN)
+        sw      t0, GPIO_ENABLE_W1TS(s0)
+
+        # The MAX7219 powers up in shutdown: configure it, then turn it on.
+        li      a0, REG_TEST
+        li      a1, 0                   # display test off
+        call    max_write
+        li      a0, REG_DECODE
+        li      a1, 0                   # no BCD decoding: raw LED patterns
+        call    max_write
+        li      a0, REG_SCAN_LIMIT
+        li      a1, 7                   # show all 8 rows
+        call    max_write
+        li      a0, REG_INTENSITY
+        li      a1, 4                   # brightness 0..15
+        call    max_write
+        li      a0, REG_SHUTDOWN
+        li      a1, 1                   # normal operation
+        call    max_write
+
+loop:
+        la      a0, heart
+        call    show
+        la      a0, msg_heart
+        li      a7, 4                   # ecall: print string
+        ecall
+        li      a0, 700
+        call    delay_ms
+
+        la      a0, smiley
+        call    show
+        la      a0, msg_smile
+        li      a7, 4
+        ecall
+        li      a0, 700
+        call    delay_ms
+        j       loop
+
+# ------------------------------------------------------------
+# show(a0 = address of 8 row bytes): write rows 0..7 to digit
+# registers 1..8.
+# ------------------------------------------------------------
+show:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s1, 8(sp)
+        sw      s2, 4(sp)
+        mv      s1, a0
+        li      s2, 1                   # digit register 1 = top row
+1:      mv      a0, s2
+        lbu     a1, 0(s1)
+        call    max_write
+        addi    s1, s1, 1
+        addi    s2, s2, 1
+        li      t0, 9
+        blt     s2, t0, 1b
+        lw      s2, 4(sp)
+        lw      s1, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# ------------------------------------------------------------
+# max_write(a0 = register, a1 = data): send one 16-bit word.
+# Uses s0 = GPIO_BASE. Clobbers t0-t5.
+# ------------------------------------------------------------
+max_write:
+        slli    t0, a0, 8
+        or      t0, t0, a1              # word = register << 8 | data
+        li      t1, 1 << CS_PIN
+        li      t2, 1 << CLK_PIN
+        li      t5, 1 << DIN_PIN
+        sw      t1, GPIO_OUT_W1TC(s0)   # CS LOW: start of the word
+        li      t3, 16                  # bits to send, MSB first
+1:      sw      t2, GPIO_OUT_W1TC(s0)   # CLK LOW
+        srli    t4, t0, 15
+        andi    t4, t4, 1
+        beqz    t4, 2f
+        sw      t5, GPIO_OUT_W1TS(s0)   # DIN = 1
+        j       3f
+2:      sw      t5, GPIO_OUT_W1TC(s0)   # DIN = 0
+3:      sw      t2, GPIO_OUT_W1TS(s0)   # CLK HIGH: the MAX7219 reads DIN
+        slli    t0, t0, 1
+        addi    t3, t3, -1
+        bnez    t3, 1b
+        sw      t2, GPIO_OUT_W1TC(s0)   # CLK LOW
+        sw      t1, GPIO_OUT_W1TS(s0)   # CS HIGH: latch the word
+        ret
+${DELAY_MS}`,
+      components: [
+        { id: 'mx1', type: 'matrix', x: 300, y: 120, props: { modules: '1', color: 'red', vcc: '5V' }, conn: { DIN: 2, CS: 3, CLK: 10 } }
+      ]
     }
   ];
 

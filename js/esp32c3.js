@@ -61,6 +61,9 @@
       // pullUp / pullDown = resistors on the board (e.g. the BOOT button's pull-up on GPIO9).
       this.ext = { force: 0, value: 0, pullUp: 0, pullDown: 0 };
       this.tx = [];                 // bytes written to the serial port
+      // Optional callback(levels) run whenever a pin level changes, at the instruction that
+      // changed it: lets parts with a serial interface (MAX7219) see every clock edge.
+      this.onPinsChanged = null;
       this.reset();
     }
 
@@ -293,6 +296,7 @@
       if (nl === this.lastLevels) return;
       this.accumulate();
       this.lastLevels = nl;
+      if (this.onPinsChanged) this.onPinsChanged(nl);
     }
 
     accumulate() {

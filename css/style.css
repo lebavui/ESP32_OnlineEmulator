@@ -673,3 +673,69 @@ body[data-sim="running"] .file-tab { border-top-color: var(--warn); }
   .inspector { width: min(270px, calc(100% - 20px)); }
 }
 .insp-warn { margin: 0; font-size: 12px; color: var(--orange-text); }
+
+/* ---- settings dialog */
+#btnSettings .badge {
+  margin-left: 6px; padding: 0 6px; border-radius: 8px; font-size: 11px;
+  border: 1px solid currentColor; color: var(--orange-text);
+}
+.dlg {
+  width: 440px; max-width: calc(100vw - 32px); padding: 0;
+  border: 1px solid var(--toast-border); border-radius: 12px;
+  background: var(--panel); color: var(--text);
+  box-shadow: 0 16px 48px var(--shadow);
+}
+.dlg::backdrop { background: rgba(0, 0, 0, .45); }
+.dlg form { padding: 14px 16px; }
+.dlg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 14px; }
+.dlg-head .icon { padding: 0 7px; line-height: 20px; }
+.dlg fieldset { border: none; margin: 0; padding: 8px 0 4px; }
+.dlg legend { padding: 0; margin-bottom: 6px; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
+.dlg .opt {
+  display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; margin-bottom: 6px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); cursor: pointer;
+}
+.dlg .opt:hover { border-color: var(--btn-hover-border); }
+.dlg .opt:has(input:checked) { border-color: var(--accent-2); }
+.dlg .opt input { margin: 3px 0 0; accent-color: var(--accent-2); }
+.dlg .opt > span { display: flex; flex-direction: column; gap: 2px; }
+.dlg .opt > span > span { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.dlg-note { margin: 2px 0 4px; padding: 6px 10px; border-radius: 6px; font-size: 12px; color: var(--orange-text); background: var(--panel-3); }
+.dlg-foot { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12px; }
+
+/* ---- collapse buttons on the splitters: hide / show the code editor and the bottom panels */
+.splitter { position: relative; }
+.split-btn {
+  position: absolute; left: 50%; top: 50%; z-index: 5; transform: translate(-50%, -50%);
+  padding: 0; justify-content: center; border-radius: 7px;
+  background: var(--panel-3); color: var(--muted); box-shadow: 0 1px 4px var(--shadow);
+}
+.split-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent-2); }
+.splitter.v .split-btn { width: 14px; height: 44px; }
+.splitter.h .split-btn { width: 44px; height: 14px; }
+.splitter.h .split-btn svg { transform: rotate(-90deg); }                         /* points down: collapse */
+.split-btn[aria-pressed="false"] svg { transform: rotate(180deg); }               /* points right: expand */
+.splitter.h .split-btn[aria-pressed="false"] svg { transform: rotate(90deg); }    /* points up: expand */
+.split-btn.badge::after { content: ""; position: absolute; top: -3px; right: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.layout.no-code { grid-template-columns: 0 5px 1fr; }
+.layout.no-code .editor-pane { visibility: hidden; overflow: hidden; }
+.layout.no-panels .right-pane { grid-template-rows: 1fr 5px 0; }
+.layout.no-panels .bottom { visibility: hidden; overflow: hidden; }
+.layout.no-code #splitV, .layout.no-panels #splitH { cursor: default; }
+/* Collapsed, the splitter sits at the window edge: keep the whole button inside the window. */
+.layout.no-code #splitV .split-btn { left: 0; transform: translate(0, -50%); border-radius: 0 7px 7px 0; }
+.layout.no-panels #splitH .split-btn { top: auto; bottom: 0; transform: translate(-50%, 0); border-radius: 7px 7px 0 0; }
+.layout.no-code #splitV:hover, .layout.no-panels #splitH:hover { background: var(--border); }
+@media (max-width: 900px) {
+  /* Panes are stacked: the splitters become thin strips that only hold the collapse buttons. */
+  .splitter { display: block; height: 18px; cursor: default; }
+  .splitter:hover { background: var(--border); }
+  .splitter.v .split-btn { width: 44px; height: 14px; }
+  .splitter.v .split-btn svg { transform: rotate(90deg); }                             /* points up: collapse */
+  .splitter.v .split-btn[aria-pressed="false"] svg { transform: rotate(-90deg); }
+  .layout.no-code .editor-pane, .layout.no-panels .bottom { display: none; }
+  .layout.no-panels .stage-wrap { height: 80vh; }
+}
+@media (max-width: 900px) {
+  .layout.no-code #splitV .split-btn, .layout.no-panels #splitH .split-btn { left: 50%; top: 50%; bottom: auto; transform: translate(-50%, -50%); border-radius: 7px; }
+}

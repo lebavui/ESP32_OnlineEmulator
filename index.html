@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RVSim C3 — ESP32-C3 RISC-V Assembly Simulator</title>
-  <meta name="description" content="Write RISC-V assembly, run it on a simulated ESP32-C3 and wire up LEDs, buttons and 7-segment displays in your browser.">
+  <meta name="description" content="Write RISC-V assembly, run it on a simulated ESP32-C3 and wire up LEDs, buttons, 7-segment displays and LED matrices in your browser.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2318202e'/%3E%3Crect x='8' y='8' width='16' height='16' rx='2' fill='%2330d158'/%3E%3Cpath d='M4 12h4M4 20h4M24 12h4M24 20h4M12 4v4M20 4v4M12 24v4M20 24v4' stroke='%23c9a74a' stroke-width='2'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
   <script>
@@ -102,7 +102,9 @@
       <div class="problems" id="problems"></div>
     </section>
 
-    <div class="splitter v" id="splitV" title="Drag to resize"></div>
+    <div class="splitter v" id="splitV" title="Drag to resize">
+      <button type="button" class="split-btn" id="btnCode" aria-pressed="true" title="Hide the code editor (Ctrl+B)" aria-label="Show or hide the code editor"><svg viewBox="0 0 8 12" width="8" height="12" aria-hidden="true"><path d="M6 1.5 1.5 6 6 10.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    </div>
 
     <section class="pane right-pane">
       <div class="stage-wrap">
@@ -113,12 +115,9 @@
           <button type="button" data-add="button"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1.5" y="1.5" width="13" height="13" rx="2" fill="none" stroke="currentColor"/><circle cx="8" cy="8" r="4" fill="#e5383b"/></svg>Button</button>
           <button type="button" data-add="switch"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1" y="4" width="14" height="8" rx="1.5" fill="#2f6fd6"/><rect x="2.5" y="5.5" width="5" height="5" fill="#fff"/></svg>Switch</button>
           <button type="button" data-add="sevenseg"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M5 2h6M4 3v4.5M12 3v4.5M5 8h6M4 9v4.5M12 9v4.5M5 14h6" stroke="#ff3b30" stroke-width="1.6"/></svg>7-Segment</button>
-          <button type="button" class="toggle" id="autoPower" aria-pressed="true" title="ON: parts' GND / 3V3 pins are connected automatically. OFF: wire each part's supply pin to a GND or 3V3 pin on the board yourself.">Auto power: <b>ON</b></button>
-          <select id="wireStyle" title="How wires are drawn. Horizontal / vertical: while wiring, click to place points; diagonal steps bend automatically.">
-            <option value="curve">Wires: curved</option>
-            <option value="ortho">Wires: horizontal / vertical</option>
-          </select>
+          <button type="button" data-add="matrix" title="8×8 LED matrix module(s) with a MAX7219 driver (DIN, CS, CLK)"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1" y="1" width="14" height="14" rx="1.5" fill="#1d5b8f"/><g fill="#ff3b30"><circle cx="4.5" cy="4.5" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="11.5" cy="11.5" r="1.3"/><circle cx="11.5" cy="4.5" r="1.3"/><circle cx="4.5" cy="11.5" r="1.3"/></g></svg>Matrix</button>
           <span class="spacer"></span>
+          <button type="button" id="btnSettings" title="Breadboard settings: power supply and wire style">⚙ Settings<span class="badge" id="powerBadge" hidden>manual power</span></button>
           <button type="button" class="icon" id="zoomOut" title="Zoom out">−</button>
           <button type="button" class="icon" id="zoomIn" title="Zoom in">+</button>
           <button type="button" class="icon" id="zoomFit" title="Fit to view">⤢</button>
@@ -129,7 +128,9 @@
         <div class="stage-help">Drag parts to move · click a part pin then a board GPIO pin to wire · scroll to zoom · drag background to pan</div>
       </div>
 
-      <div class="splitter h" id="splitH" title="Drag to resize"></div>
+      <div class="splitter h" id="splitH" title="Drag to resize">
+        <button type="button" class="split-btn" id="btnPanels" aria-pressed="true" title="Hide the bottom panels: serial monitor, messages, registers… (Ctrl+J)" aria-label="Show or hide the bottom panels"><svg viewBox="0 0 8 12" width="8" height="12" aria-hidden="true"><path d="M6 1.5 1.5 6 6 10.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      </div>
 
       <div class="bottom">
         <div class="tabs" role="tablist">
@@ -204,7 +205,7 @@
             <h3>Quick start</h3>
             <ol>
               <li>Write RISC-V (RV32IM) assembly in the editor, or pick one of the <b>Examples</b>.</li>
-              <li>Add parts with the toolbar above the board. Wire a part by clicking one of its pins and then a <b>GPIO pin</b> on the board (or choose the GPIO in the part's settings panel). Ground / 3V3 are connected automatically while <b>Auto power</b> is ON. The <b>Wires</b> menu switches between curved wires and horizontal / vertical wires; with the latter, click while wiring to place points. If a point is diagonal to the previous one, the wire bends at a right angle, first along the direction you moved the mouse (move back near the previous point to choose again). Backspace removes the last point. To edit a wire afterwards, click it: drag a round handle to move a corner, drag a bar handle to move a segment (this adds corners where the segment meets a pin), and double-click a corner to remove it. Turn Auto power OFF to wire each part's supply pin to a GND or 3V3 pin yourself: a part without power doesn't work, and the rail you choose sets its wiring mode (for example, an LED's fixed leg on 3V3 makes it active-low).</li>
+              <li>Add parts with the toolbar above the board. Wire a part by clicking one of its pins and then a <b>GPIO pin</b> on the board (or choose the GPIO in the part's settings panel). Ground / 3V3 are connected automatically while <b>Power supply</b> is set to Automatic in <b>⚙ Settings</b> (above the breadboard, on the right). <b>Wire style</b> in the same dialog switches between curved wires and horizontal / vertical wires; with the latter, click while wiring to place points. If a point is diagonal to the previous one, the wire bends at a right angle, first along the direction you moved the mouse (move back near the previous point to choose again). Backspace removes the last point. To edit a wire afterwards, click it: drag a round handle to move a corner, drag a bar handle to move a segment (this adds corners where the segment meets a pin), and double-click a corner to remove it. Set Power supply to Manual to wire each part's supply pin to a GND or 3V3 pin yourself: a part without power doesn't work, and the rail you choose sets its wiring mode (for example, an LED's fixed leg on 3V3 makes it active-low).</li>
               <li>Press <b>▶ Run</b> (F5). Use <b>Step</b> (F10), breakpoints (click a line number) and <code>ebreak</code> to debug. Choose a slow speed such as <i>10 Hz (trace)</i> to watch each instruction execute.</li>
             </ol>
 
@@ -269,7 +270,7 @@
             </table>
 
             <h3>USB-Serial-JTAG (base 0x60043000)</h3>
-            <p>The chip's own USB serial port (the USB-C connector of the SuperMini). The serial monitor's input reaches both this port and UART0.</p>
+            <p>The chip's own USB serial port (the USB-C connector of the SuperMini and the XIAO ESP32C3). The serial monitor's input reaches both this port and UART0.</p>
             <table class="grid">
               <tr><th>Offset</th><th>Name</th><th>Description</th></tr>
               <tr><td class="mono">0x00</td><td>EP1_REG</td><td>Write: queue a byte to send · Read: next received byte</td></tr>
@@ -300,7 +301,22 @@
               <tr><th>Board</th><th>GPIOs on the headers</th><th>On the board</th></tr>
               <tr><td>ESP32-C3-DevKitM-1</td><td>0–10, 18–21</td><td>BOOT button (GPIO9, active low), RST, USB-UART bridge on UART0. The RGB LED on GPIO8 is not modelled.</td></tr>
               <tr><td>ESP32-C3 SuperMini</td><td>0–10, 20, 21 (USB-C up: left IO5–IO10, IO20, IO21; right 5V, GND, 3V3, IO4–IO0)</td><td>Blue LED on GPIO8 (lit when the pin is LOW), BOOT (GPIO9), RST, USB-C = the chip's USB-Serial-JTAG (GPIO18/19)</td></tr>
+              <tr><td>Seeed Studio XIAO ESP32C3</td><td>2–10, 20, 21 (USB-C up: left D0–D6 = IO2–IO7, IO21; right 5V, GND, 3V3, D10–D7 = IO10, IO9, IO8, IO20). Pin tooltips show the D names.</td><td>BOOT (GPIO9), RST, USB-C = the chip's USB-Serial-JTAG (GPIO18/19). No user LED; UART0 is on D7 (RX) / D6 (TX).</td></tr>
             </table>
+
+            <h3>LED matrix (MAX7219)</h3>
+            <p>An 8×8 LED matrix module with a MAX7219 driver, or 4 of them daisy-chained (32×8; choose <b>Modules</b> in the part's settings). Wire <b>DIN</b>, <b>CS</b> (LOAD) and <b>CLK</b> to three GPIO outputs and send 16-bit words by bit-banging, MSB first: the MAX7219 shifts DIN in on each rising edge of CLK and stores the word when CS goes from LOW to HIGH. Bits 11–8 are the register address, bits 7–0 the data. The simulator follows every pin change as it happens, so clock edges are never missed at any speed.</p>
+            <table class="grid">
+              <tr><th>Register</th><th>Address</th><th>Data</th></tr>
+              <tr><td>No-op</td><td>0x0</td><td>Used to skip a chip in a chain</td></tr>
+              <tr><td>Digit 0–7</td><td>0x1–0x8</td><td>Row 0–7 (top to bottom); bit 7 is the leftmost LED</td></tr>
+              <tr><td>Decode mode</td><td>0x9</td><td>Bit n = 1: digit n shows a Code B character (0–9, -, E, H, L, P, blank) from data bits 3–0, bit 7 = DP</td></tr>
+              <tr><td>Intensity</td><td>0xA</td><td>0–15: brightness (duty cycle (2n+1)/32)</td></tr>
+              <tr><td>Scan limit</td><td>0xB</td><td>0–7: show digits 0..n only</td></tr>
+              <tr><td>Shutdown</td><td>0xC</td><td>0 = display off, 1 = normal operation</td></tr>
+              <tr><td>Display test</td><td>0xF</td><td>1 = all LEDs on (overrides everything else)</td></tr>
+            </table>
+            <p>At power-up (and whenever the simulation is reset) the chip is in shutdown with every register 0, so a program must at least set the scan limit and leave shutdown. In a chain, send one word per chip between CS LOW and CS HIGH: the first word ends up in the chip farthest from the board (the rightmost module); use no-ops for chips you don't want to change. The module is powered from 5V (or 3V3) and GND when Power supply is Manual. See the <i>LED matrix (MAX7219)</i> example.</p>
 
             <h3>Running on a real board</h3>
             <p>Connect the board over USB and use the <b>⚡ Hardware</b> menu (Chrome or Edge on a desktop, page opened from <code>https://</code> or <code>localhost</code>; other browsers can only download the .bin):</p>
@@ -309,12 +325,12 @@
               <li><b>Flash to board</b> writes a firmware image at flash offset 0x0 and restarts the board, so the program runs at every power-up (it replaces whatever was in flash).</li>
               <li><b>Download firmware (.bin)</b> saves the image for <code>esptool.py --chip esp32c3 write_flash 0x0 firmware.bin</code>.</li>
             </ul>
-            <p><b>Serial port:</b> the top of the menu lists the ports this page may use and marks the one in use (also shown next to the menu). Browsers don't tell web pages a port's COM / tty name, so ports are named after their USB chip (e.g. <i>ESP32 USB-Serial-JTAG (303a:1001)</i> for the SuperMini, <i>CP210x USB-UART</i> for the DevKitM-1). <b>Choose another port…</b> opens the browser's own list, which does show the COM names; <b>Forget this port</b> removes the permission.</p>
+            <p><b>Serial port:</b> the top of the menu lists the ports this page may use and marks the one in use (also shown next to the menu). Browsers don't tell web pages a port's COM / tty name, so ports are named after their USB chip (e.g. <i>ESP32 USB-Serial-JTAG (303a:1001)</i> for the SuperMini and the XIAO ESP32C3, <i>CP210x USB-UART</i> for the DevKitM-1). <b>Choose another port…</b> opens the browser's own list, which does show the COM names; <b>Forget this port</b> removes the permission.</p>
             <p>The program keeps the simulator's addresses (code at 0x40380000, data at 0x3FCA0000). A runtime added in front of it turns off the watchdogs, sets <code>sp</code> (0x3FCDA000) and <code>gp</code>, answers the <code>ecall</code> services, and prints <code>mcause</code> / <code>mepc</code> / <code>mtval</code> if the program crashes. While it runs, the serial monitor shows the board's output (including the ROM boot messages) and sends what you type to the board. If the board doesn't answer, hold <b>BOOT</b>, press <b>RST</b>, release <b>BOOT</b> and try again.</p>
-            <p>Differences on the real chip: the CPU runs at <b>20 MHz</b> (the simulator: 160 MHz), so time delays with SYSTIMER rather than instruction loops. The ESP32-C3 has no <code>cycle</code> / <code>time</code> / <code>instret</code> CSRs; the runtime emulates them with the chip's cycle counter (CSR 0x7E2, upper halves read 0). On the SuperMini, UART0 is on GPIO20/21, not on the USB-C port.</p>
+            <p>Differences on the real chip: the CPU runs at <b>20 MHz</b> (the simulator: 160 MHz), so time delays with SYSTIMER rather than instruction loops. The ESP32-C3 has no <code>cycle</code> / <code>time</code> / <code>instret</code> CSRs; the runtime emulates them with the chip's cycle counter (CSR 0x7E2, upper halves read 0). On the SuperMini and the XIAO ESP32C3, UART0 is on GPIO20/21, not on the USB-C port.</p>
 
             <h3>Keyboard</h3>
-            <p><kbd>F5</kbd> run/pause · <kbd>F10</kbd> step · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> restart · <kbd>Ctrl</kbd>+<kbd>S</kbd> save in browser · <kbd>Del</kbd> delete selected part/wire · <kbd>Esc</kbd> cancel wiring. Buttons can be given a keyboard key in their settings.</p>
+            <p><kbd>F5</kbd> run/pause · <kbd>F10</kbd> step · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> restart · <kbd>Ctrl</kbd>+<kbd>S</kbd> save in browser · <kbd>Ctrl</kbd>+<kbd>B</kbd> show/hide the code editor · <kbd>Ctrl</kbd>+<kbd>J</kbd> show/hide the bottom panels · <kbd>Del</kbd> delete selected part/wire · <kbd>Esc</kbd> cancel wiring. Buttons can be given a keyboard key in their settings.</p>
           </section>
         </div>
       </div>
@@ -327,6 +343,27 @@
     <div class="hp-barrow"><div class="hp-bar"><div id="hpFill"></div></div><span class="mono" id="hpPct"></span></div>
     <div class="hp-detail" id="hpDetail"></div>
   </div>
+  <dialog class="dlg" id="settingsDlg" aria-labelledby="settingsTitle">
+    <form method="dialog" id="settingsForm">
+      <div class="dlg-head"><b id="settingsTitle">Breadboard settings</b><span class="spacer"></span><button type="submit" class="icon" title="Close" aria-label="Close">×</button></div>
+      <fieldset>
+        <legend>Power supply</legend>
+        <label class="opt"><input type="radio" name="power" value="auto">
+          <span><b>Automatic</b><span>Parts' GND and 3V3 pins are connected for you.</span></span></label>
+        <label class="opt"><input type="radio" name="power" value="manual">
+          <span><b>Manual</b><span>Each part shows its supply pin(s): wire them to a GND or 3V3 pin on the board. A part without power does nothing, and the rail you choose sets its mode (for example, an LED's fixed leg on 3V3 makes it active-low).</span></span></label>
+        <div class="dlg-note" id="powerNote" hidden></div>
+      </fieldset>
+      <fieldset>
+        <legend>Wire style</legend>
+        <label class="opt"><input type="radio" name="wires" value="curve">
+          <span><b>Curved</b><span>Wires are drawn as curves from the part to the board.</span></span></label>
+        <label class="opt"><input type="radio" name="wires" value="ortho">
+          <span><b>Horizontal / vertical</b><span>While wiring, click to place points; a diagonal step bends at a right angle along the way you first move the mouse. Backspace removes the last point.</span></span></label>
+      </fieldset>
+      <div class="dlg-foot"><span class="dim">Changes apply right away and are saved with the project.</span><span class="spacer"></span><button type="submit" class="run">Done</button></div>
+    </form>
+  </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script src="js/assembler.js"></script>
@@ -335,6 +372,7 @@
   <script src="js/firmware.js"></script>
   <script src="js/flasher.js"></script>
   <script src="js/boards.js"></script>
+  <script src="js/max7219.js"></script>
   <script src="js/components.js"></script>
   <script src="js/examples.js"></script>
   <script src="js/app.js"></script>
