@@ -327,6 +327,48 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   check('usb-echo over the USB-Serial-JTAG model', Buffer.from(m.tx).toString().endsWith('Type something:\nHI!\n'), JSON.stringify(Buffer.from(m.tx).toString()));
 }
 
+{ // Lab board examples: LEDs / 7-seg on GPIO0..7, PB1..PB4 on GPIO9, 10, 20, 21 (pulled up by jumper PB)
+  const PB = [9, 10, 20, 21], PULL = PB.reduce((m, g) => m | (1 << g), 0) | (1 << 8);
+  const press = (m, i, t) => {
+    m.setExternal({ force: 1 << PB[i], value: 0, pullUp: PULL });
+    m.run(m.core.cycle + CPU_HZ * 0.05, null, Infinity);
+    m.setExternal({ pullUp: PULL });
+    m.run(m.core.cycle + CPU_HZ * (t || 0.05), null, Infinity);
+  };
+
+  let m = exampleMachine('lab-chaser');
+  m.setExternal({ pullUp: PULL });
+  m.run(CPU_HZ * 0.02, null, Infinity);
+  const first = m.levels() & 0xFF;
+  m.run(CPU_HZ * 0.17, null, Infinity);
+  const second = m.levels() & 0xFF;
+  press(m, 0, 0.01);                                                    // PB1: reverse
+  m.run(m.core.cycle + CPU_HZ * 0.3, null, Infinity);
+  const back = m.levels() & 0xFF;
+  press(m, 3, 0.01);                                                    // PB4 (GPIO21, was U0TXD): pause
+  const paused = m.levels() & 0xFF;
+  m.run(m.core.cycle + CPU_HZ * 0.5, null, Infinity);
+  check('lab-chaser runs, reverses (PB1) and pauses (PB4)',
+    first === 0x01 && second === 0x02 && (back === 0x01 || back === 0x80) && paused === (m.levels() & 0xFF) && m.pinFunction(21) === 'GPIO21',
+    [first, second, back, paused, m.levels() & 0xFF].map(v => v.toString(16)).join());
+
+  m = exampleMachine('lab-7seg');
+  m.setExternal({ pullUp: PULL });
+  m.run(CPU_HZ * 0.02, null, Infinity);
+  const zero = m.levels() & 0xFF;
+  press(m, 0); press(m, 0); press(m, 0);                                // PB1 x3: 3
+  const three = m.levels() & 0xFF;
+  press(m, 1); press(m, 1); press(m, 1); press(m, 1);                   // PB2 x4: F
+  press(m, 3);                                                          // PB4: decimal point
+  const fdp = m.levels() & 0xFF;
+  press(m, 2);                                                          // PB3 (GPIO20): reset
+  const out = Buffer.from(m.tx).toString();
+  check('lab-7seg counts with PB1..PB3 and toggles the dot with PB4',
+    zero === 0x3F && three === 0x4F && fdp === 0xF1 && (m.levels() & 0xFF) === 0xBF &&
+    out === 'value = 1\nvalue = 2\nvalue = 3\nvalue = 2\nvalue = 1\nvalue = 0\nvalue = 15\nvalue = 15\nvalue = 0\n',
+    [zero, three, fdp, m.levels() & 0xFF].map(v => v.toString(16)).join() + ' ' + JSON.stringify(out));
+}
+
 // ---- MAX7219: serial protocol, registers, daisy chain, and the matrix example end to end
 {
   const { MAX7219Chain } = require('../js/max7219.js');
@@ -379,6 +421,11 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   const mini = BOARDS.supermini;
   check('SuperMini pinout (USB-C up)', mini.left.join() === '5,6,7,8,9,10,20,21' && mini.right.join() === '5V,GND,3V3,4,3,2,1,0', mini.left.join() + ' | ' + mini.right.join());
   const xiao = BOARDS.xiaoc3;
+  const lab = BOARDS.labc3;
+  check('Lab board: SuperMini headers, LEDs / 7-seg on GPIO0..7, buttons on GPIO9, 10, 20, 21',
+    lab.left.join() === mini.left.join() && lab.right.join() === mini.right.join() &&
+    lab.lab.leds.map(l => l.gpio).join() === '0,1,2,3,4,5,6,7' && Object.values(lab.lab.seg.pins).join() === '0,1,2,3,4,5,6,7' &&
+    lab.lab.buttons.map(b => b.gpio).join() === '9,10,20,21');
   check('XIAO ESP32C3 pinout (USB-C up, D0-D6 left, D10-D7 right)', xiao.left.join() === '2,3,4,5,6,7,21' && xiao.right.join() === '5V,GND,3V3,10,9,8,20', xiao.left.join() + ' | ' + xiao.right.join());
 }
 

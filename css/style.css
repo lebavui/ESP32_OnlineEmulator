@@ -469,6 +469,7 @@ button.stop { color: var(--danger-text); }
 .bpin.out-lo .pin-hole { fill: #2c5aa0; }
 .bpin.in-hi .pin-hole { fill: #30d158; }
 .board-btn { cursor: pointer; }
+.tiny.lab-silk { fill: #e8eef7; }
 
 /* parts */
 .comp { cursor: grab; }

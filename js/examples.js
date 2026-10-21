@@ -44,6 +44,45 @@ delay_ms:
         .equ MCU_SEL_GPIO,      1 << 12  # function 1 = GPIOn
 `;
 
+  // Lab board (BOARDS.labc3) push buttons PB1..PB4 on GPIO9, 10, 20, 21.
+  const LAB_BUTTONS_EQU = `        .equ FUN_WPU,           1 << 8   # weak pull-up
+        .equ FUN_IE,            1 << 9   # input enable
+        .equ PB1,               1 << 9
+        .equ PB2,               1 << 10
+        .equ PB3,               1 << 20
+        .equ PB4,               1 << 21
+        .equ PB_ALL,            PB1 | PB2 | PB3 | PB4
+`;
+  const LAB_BUTTONS_SETUP = `
+        # PB1..PB4: function 1 (GPIOn), input enable, pull-up (jumper PB adds
+        # 10k pull-ups too). GPIO20/21 start as U0RXD/U0TXD, and U0TXD drives
+        # GPIO21 HIGH, so they must be switched to GPIO before PB3/PB4 work.
+        li      t1, MCU_SEL_GPIO | FUN_IE | FUN_WPU
+        li      t0, IO_MUX_BASE + 4 + 4 * 9
+        sw      t1, 0(t0)                   # IO_MUX_GPIO9_REG
+        sw      t1, 4(t0)                   # IO_MUX_GPIO10_REG
+        li      t0, IO_MUX_BASE + 4 + 4 * 20
+        sw      t1, 0(t0)                   # IO_MUX_GPIO20_REG
+        sw      t1, 4(t0)                   # IO_MUX_GPIO21_REG
+        li      s5, 0                       # buttons down at the last check
+`;
+  const LAB_NEW_PRESSES = `
+# ------------------------------------------------------------
+# new_presses() -> a0 = mask of the buttons pressed since the
+# last call (s5 = buttons down at the last call). A button reads
+# LOW while pressed. Calling it every 10 ms also debounces.
+# ------------------------------------------------------------
+new_presses:
+        lw      t0, GPIO_IN(s0)
+        not     t0, t0
+        li      t1, PB_ALL
+        and     t0, t0, t1                  # buttons down now
+        not     a0, s5
+        and     a0, a0, t0                  # down now, up last time
+        mv      s5, t0
+        ret
+`;
+
   const EXAMPLES = [
     {
       id: 'blink',
@@ -766,6 +805,164 @@ ${DELAY_MS}`,
       components: [
         { id: 'mx1', type: 'matrix', x: 300, y: 120, props: { modules: '1', color: 'red', vcc: '5V' }, conn: { DIN: 2, CS: 3, CLK: 10 } }
       ]
+    },
+    {
+      id: 'lab-chaser',
+      board: 'labc3',
+      jumpers: { LED: true, '7S': false, PB: true },
+      name: 'Lab board: LED chaser + 4 buttons',
+      description: 'Running light on the lab board\'s 8 LEDs (GPIO0..7). PB1 reverses it, PB2 / PB3 make it faster / slower, PB4 pauses it.',
+      code: `# ============================================================
+#  Lab board: running light on LED1..LED8, controlled by PB1..PB4
+#    LED1..LED8 = GPIO0..7 (lit when HIGH; jumper LED installed)
+#    PB1..PB4   = GPIO9, 10, 20, 21 (LOW while pressed)
+#    PB1: reverse   PB2: faster   PB3: slower   PB4: pause
+#  In the simulator, click the buttons or press keys 1..4.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT,          0x04
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ GPIO_IN,           0x3C
+        .equ SYSTIMER_BASE,     0x60023000
+${MCU_SEL_EQU}${LAB_BUTTONS_EQU}        .equ LED_MASK,          0xFF
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      t0, LED_MASK
+        sw      t0, GPIO_ENABLE_W1TS(s0)    # GPIO0..7 = outputs
+${GPIO_FUNC(4, 7)}${LAB_BUTTONS_SETUP}        li      s1, 0                       # position of the lit LED (0..7)
+        li      s2, 1                       # direction: +1 or -1
+        li      s3, 15                      # step time in 10 ms ticks
+        li      s4, 0                       # 1 = paused
+
+loop:
+        li      t0, 1
+        sll     t0, t0, s1                  # one LED on
+        lw      t1, GPIO_OUT(s0)            # read-modify-write so that
+        andi    t1, t1, ~LED_MASK           # other pins keep their state
+        or      t1, t1, t0
+        sw      t1, GPIO_OUT(s0)
+
+        mv      s6, s3                      # wait s3 ticks of 10 ms,
+wait:                                       # checking the buttons each tick
+        li      a0, 10
+        call    delay_ms
+        call    new_presses
+        li      t0, PB1
+        and     t1, a0, t0
+        beqz    t1, 1f
+        neg     s2, s2                      # PB1: reverse
+1:      li      t0, PB2
+        and     t1, a0, t0
+        beqz    t1, 2f
+        li      t2, 5
+        ble     s3, t2, 2f
+        addi    s3, s3, -5                  # PB2: faster (down to 50 ms)
+2:      li      t0, PB3
+        and     t1, a0, t0
+        beqz    t1, 3f
+        li      t2, 100
+        bge     s3, t2, 3f
+        addi    s3, s3, 5                   # PB3: slower (up to 1 s)
+3:      li      t0, PB4
+        and     t1, a0, t0
+        beqz    t1, 4f
+        xori    s4, s4, 1                   # PB4: pause / resume
+4:      addi    s6, s6, -1
+        bnez    s6, wait
+
+        bnez    s4, loop                    # paused: stay on this LED
+        add     s1, s1, s2                  # next LED, wrapping 7 -> 0 and 0 -> 7
+        andi    s1, s1, 7
+        j       loop
+${LAB_NEW_PRESSES}${DELAY_MS}`,
+      components: []
+    },
+    {
+      id: 'lab-7seg',
+      board: 'labc3',
+      jumpers: { LED: false, '7S': true, PB: true },
+      name: 'Lab board: hex counter on the 7-segment display',
+      description: 'Show 0..F on the lab board\'s 7-segment display (GPIO0..7). PB1 counts up, PB2 down, PB3 resets, PB4 toggles the decimal point.',
+      code: `# ============================================================
+#  Lab board: hexadecimal counter on the 7-segment display
+#    segments a..g, dp = GPIO0..7 (common cathode: a HIGH pin
+#    lights its segment; jumper 7S installed)
+#    PB1: +1   PB2: -1   PB3: back to 0   PB4: decimal point
+#  The value is also printed on the serial monitor.
+#  In the simulator, click the buttons or press keys 1..4.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT,          0x04
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ GPIO_IN,           0x3C
+        .equ SYSTIMER_BASE,     0x60023000
+${MCU_SEL_EQU}${LAB_BUTTONS_EQU}        .equ SEG_MASK,          0xFF
+
+        .data
+digits:                                     # bit0 = a ... bit6 = g
+        .byte   0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07
+        .byte   0x7F, 0x6F, 0x77, 0x7C, 0x39, 0x5E, 0x79, 0x71
+msg:    .asciz  "value = "
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      t0, SEG_MASK
+        sw      t0, GPIO_ENABLE_W1TS(s0)    # GPIO0..7 = outputs
+${GPIO_FUNC(4, 7)}${LAB_BUTTONS_SETUP}        la      s1, digits
+        li      s2, 0                       # value 0..15
+        li      s3, 0                       # decimal point: 0 or 0x80
+        call    show
+
+loop:
+        li      a0, 10                      # check the buttons every 10 ms
+        call    delay_ms
+        call    new_presses
+        beqz    a0, loop
+        mv      s4, a0
+        li      t0, PB1
+        and     t1, s4, t0
+        beqz    t1, 1f
+        addi    s2, s2, 1                   # PB1: up
+1:      li      t0, PB2
+        and     t1, s4, t0
+        beqz    t1, 2f
+        addi    s2, s2, -1                  # PB2: down
+2:      li      t0, PB3
+        and     t1, s4, t0
+        beqz    t1, 3f
+        li      s2, 0                       # PB3: reset
+3:      li      t0, PB4
+        and     t1, s4, t0
+        beqz    t1, 4f
+        xori    s3, s3, 0x80                # PB4: decimal point on / off
+4:      andi    s2, s2, 15                  # wrap F -> 0 and 0 -> F
+        call    show
+        la      a0, msg
+        li      a7, 4                       # ecall: print string
+        ecall
+        mv      a0, s2
+        li      a7, 1                       # print int
+        ecall
+        li      a0, '\\n'
+        li      a7, 11                      # print char
+        ecall
+        j       loop
+
+# show: segment pattern of digit s2, plus the decimal point s3
+show:
+        add     t0, s1, s2
+        lbu     t1, 0(t0)
+        or      t1, t1, s3
+        lw      t2, GPIO_OUT(s0)
+        andi    t2, t2, ~SEG_MASK
+        or      t2, t2, t1
+        sw      t2, GPIO_OUT(s0)
+        ret
+${LAB_NEW_PRESSES}${DELAY_MS}`,
+      components: []
     }
   ];
 

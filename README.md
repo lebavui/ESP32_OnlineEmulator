@@ -34,9 +34,10 @@ npx serve .          # or: python -m http.server
   - 7-segment display (common cathode or anode)
   - LED matrix: 8×8 module with a MAX7219 driver, or 4 modules daisy-chained (32×8), driven by bit-banging DIN / CS / CLK. All MAX7219 registers are modelled (digits, Code B decode, intensity, scan limit, shutdown, display test); the simulator follows every clock edge as the program writes the pins
   - The board's own BOOT (GPIO9) and RST buttons
+  - On the lab board: 8 LEDs, a 7-segment digit and 4 push buttons, with jumpers that connect or disconnect them
 
   LEDs and segments show PWM/multiplexing brightness. Each part draws its fixed GND or 3V3 terminal to match its wiring mode.
-- **Boards:** ESP32-C3-DevKitM-1, ESP32-C3 SuperMini or Seeed Studio XIAO ESP32C3 (correct header pinout, the XIAO's D0–D10 names in the pin tooltips, the SuperMini's blue LED on GPIO8, BOOT and RST buttons), chosen above the breadboard and saved with the project.
+- **Boards:** ESP32-C3-DevKitM-1, ESP32-C3 SuperMini, Seeed Studio XIAO ESP32C3 (correct header pinout, the XIAO's D0–D10 names in the pin tooltips, the SuperMini's blue LED on GPIO8, BOOT and RST buttons) or the ESP32-C3 Lab Board, chosen above the breadboard and saved with the project. The lab board is a SuperMini on a carrier PCB with LED1–LED8 on GPIO0–7 (active high), a common-cathode 7-segment digit (a–g, dp on GPIO0–7) and push buttons PB1–PB4 on GPIO9, 10, 20, 21 (to GND; keys 1–4). Its jumpers LED, 7S and PB (click to install / remove, saved with the project) connect the LEDs, the display and the buttons' 10k pull-ups.
 - **Real hardware** (⚡ Hardware menu, Chrome / Edge on a desktop): build the program for a real ESP32-C3 and, over Web Serial, either load it into SRAM and run it or write it to flash; or download the firmware `.bin` for `esptool.py write_flash 0x0`. The board's serial output appears in the serial monitor, and what you type is sent to the board. The menu shows which port is in use (named after its USB chip, since browsers hide COM names from pages) and lets you switch to or forget another port. A small runtime added to the program turns off the watchdogs, sets `sp`/`gp`, implements the `ecall` services over USB-Serial-JTAG and UART0, and reports crashes (`mcause`, `mepc`, `mtval`). Tested on an ESP32-C3 SuperMini.
 - **Wiring:** click a part's pin, then a GPIO pin on the board. You can also pick the GPIO in the part's settings panel.
 - **Wire style** (⚙ Settings dialog above the breadboard, saved with the project): curved wires, or horizontal / vertical wires. Horizontal / vertical wiring works like Wokwi: click to place points, and a diagonal step bends at a right angle along the direction you first moved the mouse (Backspace removes the last point). Click a wire to edit it Tinkercad-style: drag corner handles, drag segment handles to move a segment (adding corners where needed), double-click a corner to remove it. Wires without points are routed automatically.
@@ -45,7 +46,7 @@ npx serve .          # or: python -m http.server
 - **Layout:** drag the dividers to resize the editor, breadboard and bottom panels. The arrow buttons on the dividers (or <kbd>Ctrl</kbd>+<kbd>B</kbd> / <kbd>Ctrl</kbd>+<kbd>J</kbd>) hide or show the code editor and the bottom panels (serial monitor, messages, registers, …) to give the breadboard more room; a dot on the bottom divider's button means new serial output or a warning arrived while they were hidden. The layout is remembered in the browser.
 - **Light / dark theme:** the ☀ / ☾ button in the top bar. It follows the system setting until you pick one.
 - **Projects:**
-  - 11 built-in examples, 3 of them for the SuperMini's on-board LED, BOOT button and USB serial port
+  - 13 built-in examples: 3 for the SuperMini's on-board LED, BOOT button and USB serial port, 2 for the lab board (LED chaser, 7-segment hex counter)
   - Autosave in the browser
   - Save/open `.json` projects or `.S` source files
   - Share links that carry the whole project in the URL
@@ -75,6 +76,7 @@ npx serve .          # or: python -m http.server
 - The standard counter CSRs (`cycle`, `time`, `instret`, `mcycle`, …) work in the simulator but don't exist on the ESP32-C3. The hardware runtime emulates them with the chip's own cycle counter (CSR 0x7E2, also modelled in the simulator); their high halves read 0 there.
 - On the SuperMini and the XIAO ESP32C3, UART0 is on GPIO20/21, not on the USB-C port: use USB-Serial-JTAG or the `ecall` services to talk to the computer.
 - The MAX7219 accepts any clock speed and timing (the real chip needs ≥ 50 ns CLK pulses, up to 10 MHz), and DOUT is not available as a pin. The matrix shows each row as written; it doesn't model the multiplexing flicker or the brightness change with the scan limit. Power-supply limits (the MAX7219 is specified for 4–5.5 V; 3V3 is allowed) aren't checked.
+- Lab board: the LEDs and the display share GPIO0–7, but they don't load the pins (an LED doesn't pull an input pin low), and the display's single common resistor doesn't make digits with many lit segments dimmer.
 - Every instruction takes one cycle. There are no interrupts, caches or flash/ROM functions.
 - The C (compressed) extension isn't generated or decoded.
 - Misaligned loads and stores, and accesses to unmapped addresses, stop the simulation with an error.

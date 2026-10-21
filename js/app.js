@@ -33,6 +33,8 @@
   let autoPower = true;        // parts' GND / 3V3 pins are connected automatically
   let wireStyle = 'curve';     // 'curve' | 'ortho' (horizontal / vertical segments with user-placed corners)
   let bootPressed = false;
+  let labPressed = [];         // on-board push buttons of BOARD.lab, by index
+  let jumpers = {};            // BOARD.lab jumper id -> installed
 
   // ================================================================ helpers
 
@@ -510,6 +512,7 @@
     let force = 0, value = 0;
     const set = (g, v) => { if (!((force >>> g) & 1)) { force |= 1 << g; if (v) value |= 1 << g; } };
     if (bootPressed) set(9, 0);
+    if (BOARD.lab) BOARD.lab.buttons.forEach((b, i) => { if (labPressed[i]) set(b.gpio, 0); });
     for (const c of comps) {
       const g = c.conn['1'];
       if (g === undefined || g === null) continue;
@@ -520,8 +523,15 @@
         if (v !== null) set(g, v);
       }
     }
-    machine.setExternal({ force, value, pullUp: BOARD.pullUp });   // pull-ups on the board (BOOT button, …)
+    machine.setExternal({ force, value, pullUp: boardPullUp() });  // pull-ups on the board (BOOT button, …)
     if (simState !== 'running') updateAll(true);
+  }
+
+  // Pull-ups on the board; on a lab board the PB jumper connects the buttons' pull-up resistors.
+  function boardPullUp() {
+    let m = BOARD.pullUp;
+    if (BOARD.lab && jumpers.PB) for (const b of BOARD.lab.buttons) m |= 1 << b.gpio;
+    return m;
   }
 
   // Warn (once per run and pin) when the program reads a button / switch pin that is
@@ -529,6 +539,7 @@
   let ioWarned = 0;
   function inputPartPins() {
     let mask = 0;
+    if (BOARD.lab) for (const b of BOARD.lab.buttons) mask |= 1 << b.gpio;
     for (const c of comps) {
       const g = c.conn['1'];
       if ((c.type === 'button' || c.type === 'switch') && g !== undefined && g !== null) mask |= 1 << g;
@@ -611,18 +622,40 @@
   // Power pins, keyed by side + index ('L0', 'R3', ...) because GND appears many times.
   let POWER_PINS = {};
 
-  function setBoard(id) {
+  // jp: jumper settings of a lab board ({ LED: true, ... }); missing ones are installed.
+  function setBoard(id, jp) {
     boardId = BOARDS[id] ? id : DEFAULT_BOARD;
     BOARD = BOARDS[boardId];
+    labPressed = [];
+    jumpers = {};
+    if (BOARD.lab) for (const j of BOARD.lab.jumpers) jumpers[j.id] = !(jp && jp[j.id] === false);
     GPIO_PINS = BOARD.gpios.slice();
     GPIO_NOTES = Object.assign({}, CHIP_NOTES, BOARD.notes);
     POWER_PINS = {};
     [['L', BOARD.left], ['R', BOARD.right]].forEach(([side, list]) => list.forEach((l, i) => {
       if (/^(GND|3V3|5V)$/.test(l)) POWER_PINS[side + i] = l;
     }));
+    renderBoard();
+    $('#boardSel').value = boardId;
+  }
+
+  function renderBoard() {
     boardPinPos.clear();
     boardLayer.innerHTML = boardSvg();
-    $('#boardSel').value = boardId;
+  }
+
+  function toggleJumper(id) {
+    jumpers[id] = !jumpers[id];
+    renderBoard();
+    applyInputs();
+    scheduleSave();
+    toast(`Jumper ${id} ${jumpers[id] ? 'installed' : 'removed'}`);
+  }
+
+  function pressLabButton(i, down) {
+    if (!!labPressed[i] === down) return;
+    labPressed[i] = down;
+    applyInputs();
   }
 
   // Switch boards in the editor: keep supply wires (re-attached to the nearest pin of the
@@ -740,11 +773,62 @@
     return `
       <g class="board">
         ${BOARD.art()}
+        ${BOARD.lab ? labSvg(BOARD.lab) : ''}
         ${led}
         ${btn('boot', 'BOOT', 'BOOT button (GPIO9, active low)')}
         ${btn('rst', 'RST', 'RESET: restart the program')}
         ${pins}
       </g>`;
+  }
+
+  // Parts soldered on a lab board (BOARDS.labc3): LEDs, a 7-segment digit, push buttons, jumpers.
+  function labSvg(lab) {
+    let s = '';
+    lab.leds.forEach((l, i) => {
+      s += `<g class="lab-led" data-lab-led="${i}" transform="translate(${l.x} ${l.y})">
+          <text x="-18" y="-13" class="tiny lab-silk">${l.label}</text>
+          <rect x="-18" y="-8" width="36" height="16" rx="2" fill="#d9dde3"/>
+          <circle class="bl-glow" r="17" fill="${lab.ledColor}" opacity="0" filter="url(#glowBlur)"/>
+          <rect class="bl-lit" x="-13" y="-6" width="26" height="12" rx="1.5" fill="${lab.ledColor}" opacity="0.15"/>
+          <title>${l.label}: GPIO${l.gpio} → LED → resistor → GND (jumper LED), lit when the pin is HIGH</title>
+        </g>`;
+    });
+    // the sevenseg part's geometry, a bit larger, centred on (seg.x, seg.y)
+    const W = 46, H = 104, T = 9, L = H / 2, x0 = lab.seg.x - W / 2 - 5, y0 = lab.seg.y - H / 2;
+    const hseg = (x, y) => `${x + 2},${y} ${x + T / 2 + 2},${y - T / 2} ${x + W - T / 2 - 2},${y - T / 2} ${x + W - 2},${y} ${x + W - T / 2 - 2},${y + T / 2} ${x + T / 2 + 2},${y + T / 2}`;
+    const vseg = (x, y) => `${x},${y + 2} ${x + T / 2},${y + T / 2 + 2} ${x + T / 2},${y + L - T / 2 - 2} ${x},${y + L - 2} ${x - T / 2},${y + L - T / 2 - 2} ${x - T / 2},${y + T / 2 + 2}`;
+    const segs = {
+      a: hseg(x0, y0), g: hseg(x0, y0 + L), d: hseg(x0, y0 + H),
+      f: vseg(x0, y0), b: vseg(x0 + W, y0), e: vseg(x0, y0 + L), c: vseg(x0 + W, y0 + L)
+    };
+    const segTip = Object.entries(lab.seg.pins).map(([k, g]) => `${k}=GPIO${g}`).join(', ');
+    s += `<g class="lab-seg">
+        <g transform="translate(${lab.seg.x} ${lab.seg.y}) skewX(-6) translate(${-lab.seg.x} ${-lab.seg.y})" fill="${lab.seg.color}">
+          ${Object.entries(segs).map(([k, pts]) => `<polygon class="seg-${k}" points="${pts}" opacity="0.1"/>`).join('')}
+        </g>
+        <circle class="seg-dp" cx="${x0 + W + 11}" cy="${y0 + H + 2}" r="4.6" fill="${lab.seg.color}" opacity="0.1"/>
+        <title>7-segment display, common cathode to GND (jumper 7S): ${segTip}</title>
+      </g>`;
+    lab.buttons.forEach((b, i) => {
+      s += `<g class="board-btn" data-board-btn="pb${i}" transform="translate(${b.x} ${b.y})">
+          <text y="-40" class="tiny lab-silk" text-anchor="middle">${b.label}</text>
+          ${[[-29, -25], [29, -25], [-29, 25], [29, 25]].map(([x, y]) => `<circle cx="${x}" cy="${y}" r="6" fill="#d6a640"/><circle cx="${x}" cy="${y}" r="2.5" fill="#14171c"/>`).join('')}
+          <rect x="-22" y="-22" width="44" height="44" rx="3" fill="#c9ccd2" stroke="#8a9099"/>
+          <circle r="14" fill="#5d6470"/>
+          <circle class="bb-cap" r="12" fill="#2b2f36"/>
+          <title>${b.label}: GPIO${b.gpio}, connects the pin to GND while pressed (key ${b.key})</title>
+        </g>`;
+    });
+    for (const j of lab.jumpers) {
+      const on = jumpers[j.id];
+      s += `<g class="board-btn" data-board-btn="jp-${j.id}" transform="translate(${j.x} ${j.y})">
+          ${[0, 1, 2].map(k => `<rect x="-6" y="${k * 20 - 6}" width="12" height="12" rx="${k ? 6 : 1}" fill="#d6a640"/><circle cy="${k * 20}" r="2.5" fill="#14171c"/>`).join('')}
+          ${on ? '<rect x="-8" y="-10" width="16" height="40" rx="2" fill="#2b2f36" stroke="#0e0f11"/><rect x="-4" y="-4" width="8" height="28" rx="1" fill="#454b55"/>'
+          : '<rect x="-8" y="-10" width="16" height="40" rx="2" fill="transparent" stroke="#ffd60a" stroke-width="1.2" stroke-dasharray="3 2"/>'}
+          <title>${esc(j.tip)} (${on ? 'installed' : 'removed'}): click to ${on ? 'remove' : 'install'} it</title>
+        </g>`;
+    }
+    return s;
   }
 
   function compById(id) { return comps.find(c => c.id === id); }
@@ -1056,6 +1140,30 @@
     }
     const boot = boardLayer.querySelector('[data-board-btn="boot"] .bb-cap');
     if (boot) boot.setAttribute('r', bootPressed ? 5 : 6.5);
+    if (BOARD.lab) updateLab(BOARD.lab, duty, enable);
+  }
+
+  // Lab board LEDs and display: lit while the chip drives the pin HIGH and the jumper is installed.
+  function updateLab(lab, duty, enable) {
+    const lit = g => ((enable >>> g) & 1) ? duty[g] : 0;
+    lab.leds.forEach((l, i) => {
+      const el = boardLayer.querySelector(`[data-lab-led="${i}"]`), on = jumpers.LED ? lit(l.gpio) : 0;
+      if (!el) return;
+      el.querySelector('.bl-lit').setAttribute('opacity', (0.15 + 0.85 * on).toFixed(3));
+      el.querySelector('.bl-glow').setAttribute('opacity', (0.9 * on).toFixed(3));
+    });
+    const seg = boardLayer.querySelector('.lab-seg');
+    if (seg) {
+      for (const [k, g] of Object.entries(lab.seg.pins)) {
+        const d = jumpers['7S'] ? lit(g) : 0, el = seg.querySelector('.seg-' + k);
+        el.setAttribute('opacity', (0.1 + 0.9 * d).toFixed(3));
+        el.style.filter = d > 0.3 ? 'url(#segGlow)' : '';
+      }
+    }
+    lab.buttons.forEach((b, i) => {
+      const cap = boardLayer.querySelector(`[data-board-btn="pb${i}"] .bb-cap`);
+      if (cap) cap.setAttribute('r', labPressed[i] ? 9.5 : 12);
+    });
   }
 
   // ---- selection & inspector
@@ -1406,7 +1514,10 @@
       const bb = t.closest('[data-board-btn]');
       if (bb) {
         e.preventDefault();
-        if (bb.dataset.boardBtn === 'boot') { bootPressed = true; applyInputs(); svg.setPointerCapture(e.pointerId); drag = { type: 'boot' }; }
+        const kind = bb.dataset.boardBtn;
+        if (kind === 'boot') { bootPressed = true; applyInputs(); svg.setPointerCapture(e.pointerId); drag = { type: 'boot' }; }
+        else if (kind.startsWith('pb')) { pressLabButton(+kind.slice(2), true); svg.setPointerCapture(e.pointerId); drag = { type: 'pb', i: +kind.slice(2) }; }
+        else if (kind.startsWith('jp-')) toggleJumper(kind.slice(3));
         else if (simState !== 'stopped') { stop(); run(); toast('Reset'); }
         return;
       }
@@ -1510,6 +1621,7 @@
     if (pointerButton) { pressButton(pointerButton, false); pointerButton = null; }
     if (!drag) return;
     if (drag.type === 'boot') { bootPressed = false; applyInputs(); }
+    if (drag.type === 'pb') pressLabButton(drag.i, false);
     if ((drag.type === 'wcorner' || drag.type === 'wseg') && drag.moved) {
       const P = wirePointsOf(drag.c, drag.pin);
       if (P) setWirePoints(drag.c, drag.pin, simplifyPoints(P));
@@ -1560,14 +1672,19 @@
     const k = e.key.toLowerCase();
     let hit = false;
     for (const c of comps) if (c.type === 'button' && c.props.key && c.props.key === k) { pressButton(c, true); hit = true; }
+    if (BOARD.lab) BOARD.lab.buttons.forEach((b, i) => { if (b.key === k) { pressLabButton(i, true); hit = true; } });
     if (hit) e.preventDefault();
   });
   document.addEventListener('keyup', e => {
     if (e.target.closest('input, textarea, select')) return;
     const k = e.key.toLowerCase();
     for (const c of comps) if (c.type === 'button' && c.props.key && c.props.key === k) { pressButton(c, false); e.preventDefault(); }
+    if (BOARD.lab) BOARD.lab.buttons.forEach((b, i) => { if (b.key === k) { pressLabButton(i, false); e.preventDefault(); } });
   });
-  window.addEventListener('blur', () => { for (const c of comps) if (c.pressed) pressButton(c, false); });
+  window.addEventListener('blur', () => {
+    for (const c of comps) if (c.pressed) pressButton(c, false);
+    labPressed.forEach((d, i) => { if (d) pressLabButton(i, false); });
+  });
 
   // ================================================================ bottom panels
 
@@ -2158,6 +2275,7 @@ Serial port: ${portLabel(port)}` : '');
     return {
       app: 'rvsim-c3', version: 1,
       board: boardId,
+      jumpers: Object.assign({}, jumpers),
       code: ta.value,
       autoPower,
       wireStyle,
@@ -2171,7 +2289,7 @@ Serial port: ${portLabel(port)}` : '');
     ta.value = p.code || '';
     setAutoPower(p.autoPower !== false);
     setWireStyle(p.wireStyle);
-    setBoard(p.board);
+    setBoard(p.board, p.jumpers);
     comps = normalizeComps(p.components);
     breakpointLines = new Set((p.breakpoints || []).filter(n => Number.isInteger(n)));
     selection = null;
@@ -2227,7 +2345,7 @@ Serial port: ${portLabel(port)}` : '');
     const ex = EXAMPLES.find(x => x.id === b.dataset.ex);
     const pristine = EXAMPLES.some(x => x.code === ta.value) || ta.value.trim() === BLANK.trim() || !ta.value.trim();
     if (!pristine && !confirm(`Load example "${ex.name}"? Your current program and parts will be replaced.\n(Tip: use Save first to keep them.)`)) return;
-    loadProject({ code: ex.code, board: ex.board, components: JSON.parse(JSON.stringify(ex.components)) });
+    loadProject({ code: ex.code, board: ex.board, jumpers: ex.jumpers, components: JSON.parse(JSON.stringify(ex.components)) });
     toast(`Loaded example: ${ex.name}`, 'ok');
   });
 
@@ -2419,7 +2537,7 @@ Serial port: ${portLabel(port)}` : '');
     }
     if (!project || typeof project.code !== 'string') {
       const ex = EXAMPLES[0];
-      project = { code: ex.code, board: ex.board, components: JSON.parse(JSON.stringify(ex.components)) };
+      project = { code: ex.code, board: ex.board, jumpers: ex.jumpers, components: JSON.parse(JSON.stringify(ex.components)) };
     }
     loadProject(project, { noSave: true });
     updateControls();

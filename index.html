@@ -302,6 +302,7 @@
               <tr><td>ESP32-C3-DevKitM-1</td><td>0–10, 18–21</td><td>BOOT button (GPIO9, active low), RST, USB-UART bridge on UART0. The RGB LED on GPIO8 is not modelled.</td></tr>
               <tr><td>ESP32-C3 SuperMini</td><td>0–10, 20, 21 (USB-C up: left IO5–IO10, IO20, IO21; right 5V, GND, 3V3, IO4–IO0)</td><td>Blue LED on GPIO8 (lit when the pin is LOW), BOOT (GPIO9), RST, USB-C = the chip's USB-Serial-JTAG (GPIO18/19)</td></tr>
               <tr><td>Seeed Studio XIAO ESP32C3</td><td>2–10, 20, 21 (USB-C up: left D0–D6 = IO2–IO7, IO21; right 5V, GND, 3V3, D10–D7 = IO10, IO9, IO8, IO20). Pin tooltips show the D names.</td><td>BOOT (GPIO9), RST, USB-C = the chip's USB-Serial-JTAG (GPIO18/19). No user LED; UART0 is on D7 (RX) / D6 (TX).</td></tr>
+              <tr><td>ESP32-C3 Lab Board</td><td>Same as the SuperMini (the female headers J2 / J1 beside the module repeat its pins)</td><td>A SuperMini on a carrier board with: 8 LEDs LED1–LED8 on GPIO0–7 (pin → LED → resistor → GND, lit when HIGH); a common-cathode 7-segment digit with a–g, dp on GPIO0–7; push buttons PB1–PB4 on GPIO9, 10, 20, 21 (pin → GND while pressed; keys <kbd>1</kbd>–<kbd>4</kbd>). Click a jumper to install / remove it: <b>LED</b> and <b>7S</b> connect the LEDs' and the display's ground, <b>PB</b> the buttons' 10k pull-ups. GPIO4–7 start in the JTAG function and GPIO20/21 as U0RXD/U0TXD (U0TXD drives GPIO21 HIGH), so set <code>MCU_SEL</code> = 1 in their IO_MUX registers first.</td></tr>
             </table>
 
             <h3>LED matrix (MAX7219)</h3>
