@@ -34,6 +34,16 @@
     ? `<text x="${x}" y="${y + 6}" class="tiny" text-anchor="middle">3V3</text>`
     : `<path d="M${x - 3} ${y} h6 M${x - 2} ${y + 3} h4 M${x - 1} ${y + 6} h2" class="gnd-sym"/>`;
   const opts = list => list.map(v => Array.isArray(v) ? v : [v, v[0].toUpperCase() + v.slice(1)]);
+  // Polygons of segments a..g of a digit: top-left corner (x0, y0), width W, height H, thickness T.
+  const segPolys = (x0, y0, W, H, T) => {
+    const L = H / 2;
+    const hseg = (x, y) => `${x + 2},${y} ${x + T / 2 + 2},${y - T / 2} ${x + W - T / 2 - 2},${y - T / 2} ${x + W - 2},${y} ${x + W - T / 2 - 2},${y + T / 2} ${x + T / 2 + 2},${y + T / 2}`;
+    const vseg = (x, y) => `${x},${y + 2} ${x + T / 2},${y + T / 2 + 2} ${x + T / 2},${y + L - T / 2 - 2} ${x},${y + L - 2} ${x - T / 2},${y + L - T / 2 - 2} ${x - T / 2},${y + T / 2 + 2}`;
+    return {
+      a: hseg(x0, y0), g: hseg(x0, y0 + L), d: hseg(x0, y0 + H),
+      f: vseg(x0, y0), b: vseg(x0 + W, y0), e: vseg(x0, y0 + L), c: vseg(x0 + W, y0 + L)
+    };
+  };
 
   const PARTS = {
     led: {
@@ -94,6 +104,67 @@
         const glow = el.querySelector('.glow');
         lens.setAttribute('opacity', (0.32 + 0.68 * d).toFixed(3));
         glow.setAttribute('opacity', (0.85 * d).toFixed(3));
+      }
+    },
+
+    // 4-leg RGB LED (R, common, G, B; the common leg is the longest). Each colour mixes in by
+    // its pin's duty, so PWM on the three pins gives any colour.
+    rgbled: {
+      title: 'RGB LED',
+      w: 52, h: 86,
+      pins: [
+        { name: 'R', label: 'Red', x: 11, y: 86, dir: 'down' },
+        { name: 'G', label: 'Green', x: 31, y: 86, dir: 'down' },
+        { name: 'B', label: 'Blue', x: 41, y: 86, dir: 'down' }
+      ],
+      power: [{ name: 'COM', label: 'Common', x: 21, y: 86, dir: 'down' }],
+      rail: c => c.props.common === 'anode' ? '3V3' : 'GND',
+      setRail(c, pin, r) { c.props.common = r === '3V3' ? 'anode' : 'cathode'; },
+      defaults: { common: 'cathode' },
+      props: [
+        {
+          key: 'common', label: 'Type', type: 'select', options: [
+            ['cathode', 'Common cathode → GND (on when HIGH)'],
+            ['anode', 'Common anode → 3V3 (on when LOW)']
+          ]
+        }
+      ],
+      pinLabel(c, p) {
+        if (p.name !== 'COM') return p.label;
+        return c.props.common === 'anode' ? 'Common anode (+)' : 'Common cathode (−)';
+      },
+      render(c, o) {
+        const manual = o && !o.auto;
+        const anode = c.props.common === 'anode';
+        const legs = [[11, 'R', '#ff3b30'], [31, 'G', '#30e04a'], [41, 'B', '#3a8bff']];
+        return `
+          <circle class="glow" cx="26" cy="24" r="27" fill="#fff" opacity="0" filter="url(#glowBlur)"/>
+          ${legs.map(([x]) => `<path d="M${x} 50 V86" class="leg"/>`).join('')}
+          <path d="M21 50 V${manual ? 86 : 78}" class="leg"/>
+          ${legs.map(([x, n, col]) => `<text x="${x}" y="62" class="pol" fill="${col}" text-anchor="middle" style="font-size:7px">${n}</text>`).join('')}
+          <path d="M8 48 V24 A18 18 0 0 1 44 24 V48 Z" fill="#e8ebf0" class="lens" opacity="0.35"/>
+          <path d="M8 48 V24 A18 18 0 0 1 44 24 V48 Z" fill="url(#lensShine)" stroke="#9aa3b2" stroke-opacity="0.5" stroke-width="0.8" pointer-events="none"/>
+          <rect x="5" y="44" width="42" height="6" rx="1.5" fill="#d8dce3" opacity="0.6"/>
+          <rect x="5" y="44" width="42" height="6" rx="1.5" fill="#000" opacity="0.2"/>
+          ${manual ? '' : supply(anode, 21, 78)}`;
+      },
+      update(el, c, ctx) {
+        const anode = c.props.common === 'anode';
+        const ch = ['R', 'G', 'B'].map(p => {
+          const d = ctx.duty(p);
+          if (d === null || !ctx.powered) return 0;
+          return anode ? (ctx.driven(p) ? 1 - d : 0) : d;
+        });
+        const key = ch.map(v => v.toFixed(2)).join();
+        if (el._rgb === key) return;                 // nothing changed since the last frame
+        el._rgb = key;
+        const m = Math.max(...ch);
+        const col = m > 0.01 ? `rgb(${ch.map(v => Math.round(255 * v / m)).join(',')})` : '#e8ebf0';
+        const lens = el.querySelector('.lens'), glow = el.querySelector('.glow');
+        lens.setAttribute('fill', col);
+        lens.setAttribute('opacity', (0.35 + 0.65 * m).toFixed(3));
+        glow.setAttribute('fill', col);
+        glow.setAttribute('opacity', (0.85 * m).toFixed(3));
       }
     },
 
@@ -217,14 +288,9 @@
       ],
       render(c, o) {
         const col = LED_COLORS[c.props.color] || LED_COLORS.red;
-        const x0 = 24, y0 = 26, W = 34, H = 76, T = 7, L = H / 2;
-        const hseg = (x, y) => `${x + 2},${y} ${x + T / 2 + 2},${y - T / 2} ${x + W - T / 2 - 2},${y - T / 2} ${x + W - 2},${y} ${x + W - T / 2 - 2},${y + T / 2} ${x + T / 2 + 2},${y + T / 2}`;
-        const vseg = (x, y) => `${x},${y + 2} ${x + T / 2},${y + T / 2 + 2} ${x + T / 2},${y + L - T / 2 - 2} ${x},${y + L - 2} ${x - T / 2},${y + L - T / 2 - 2} ${x - T / 2},${y + T / 2 + 2}`;
+        const x0 = 24, y0 = 26, W = 34, H = 76;
         const sk = 'skewX(-6)';
-        const segs = {
-          a: hseg(x0, y0), g: hseg(x0, y0 + L), d: hseg(x0, y0 + H),
-          f: vseg(x0, y0), b: vseg(x0 + W, y0), e: vseg(x0, y0 + L), c: vseg(x0 + W, y0 + L)
-        };
+        const segs = segPolys(x0, y0, W, H, 7);
         const pinLabels = this.pins.map(p =>
           `<text x="${p.x}" y="${p.y === 0 ? 16 : 122}" class="tiny light" text-anchor="middle">${p.name}</text>`).join('');
         return `
@@ -322,8 +388,186 @@
         el._dots = key;
         el.querySelectorAll('.dot').forEach((d, i) => d.setAttribute('opacity', levels[i]));
       }
-    }
+    },
+
+    // 4-digit 7-segment module driven by a TM1637 (js/tm1637.js). Display register n is
+    // digit n from the left; bit 7 is the colon (on digit 1) or each digit's decimal point.
+    // The module's 10k pull-ups on CLK and DIO are applied in app.js applyInputs.
+    tm1637: {
+      title: '4-digit display (TM1637)',
+      w: 184, h: 104,
+      pins: [
+        { name: 'CLK', label: 'CLK', x: 65, y: 104, dir: 'down' },
+        { name: 'DIO', label: 'DIO (data, open drain)', x: 83, y: 104, dir: 'down' }
+      ],
+      power: [
+        { name: 'VCC', label: 'VCC', x: 101, y: 104, dir: 'down' },
+        { name: 'GND', label: 'GND', x: 119, y: 104, dir: 'down' }
+      ],
+      supplies: ['GND', '3V3', '5V'],
+      rail: (c, pin) => pin === 'GND' ? 'GND' : c.props.vcc === '5V' ? '5V' : '3V3',
+      setRail(c, pin, r) { if (pin === 'VCC' && r !== 'GND') c.props.vcc = r; },
+      defaults: { points: 'colon', color: 'red', vcc: '3V3' },
+      props: [
+        { key: 'points', label: 'Bit 7', type: 'select', options: [['colon', 'Colon (clock display, digit 1)'], ['dots', 'Decimal point of each digit']] },
+        { key: 'color', label: 'Color', type: 'select', options: opts(['red', 'green', 'blue', 'yellow', 'white']) }
+      ],
+      digitX: i => 26 + 36 * i + (i >= 2 ? 10 : 0),
+      render(c, o) {
+        const col = LED_COLORS[c.props.color] || LED_COLORS.red;
+        const off = 'opacity="0.08"';
+        let digits = '';
+        for (let i = 0; i < 4; i++) {
+          const segs = segPolys(this.digitX(i), 22, 20, 44, 5);
+          digits += `<g transform="translate(5 0) skewX(-6)">${'abcdefg'.split('').map((k, b) =>
+            `<polygon class="tseg" data-d="${i}" data-b="${b}" points="${segs[k]}" ${off}/>`).join('')}</g>`;
+          if (c.props.points === 'dots') digits += `<circle class="tseg" data-d="${i}" data-b="7" cx="${this.digitX(i) + 24}" cy="67" r="2.6" ${off}/>`;
+        }
+        if (c.props.points !== 'dots') {
+          digits += `<circle class="tseg" data-d="1" data-b="7" cx="96" cy="35" r="2.6" ${off}/><circle class="tseg" data-d="1" data-b="7" cx="94" cy="53" r="2.6" ${off}/>`;
+        }
+        const header = this.pins.concat(this.power).map(p => {
+          const leg = !o || o.auto ? this.pins.includes(p) : true;
+          return `${leg ? `<path d="M${p.x} 98 V104" class="leg"/>` : ''}
+            <rect x="${p.x - 3}" y="92" width="6" height="6" fill="#c9a74a"/>
+            <text x="${p.x}" y="89" class="tiny light" text-anchor="middle">${p.name}</text>`;
+        }).join('');
+        return `
+          <rect x="0" y="0" width="184" height="98" rx="3" fill="#1d5b8f" stroke="#123a5c" stroke-width="1.5"/>
+          <rect x="8" y="8" width="168" height="70" rx="2" fill="#101114"/>
+          <g fill="${col}">${digits}</g>
+          <text x="166" y="89" class="tiny light" text-anchor="end">TM1637</text>
+          ${header}`;
+      },
+      update(el, c, ctx) {
+        const chip = ctx.powered ? ctx.device : null;
+        const segs = chip ? chip.segments() : null;
+        const on = chip ? (0.35 + 0.65 * Math.sqrt(chip.brightness())).toFixed(2) : '0';
+        const key = segs ? on + segs.join() : '';
+        if (el._segs === key) return;                // nothing changed since the last frame
+        el._segs = key;
+        el.querySelectorAll('.tseg').forEach(s => {
+          const lit = segs && (segs[+s.dataset.d] >> +s.dataset.b) & 1;
+          s.setAttribute('opacity', lit ? on : '0.08');
+          s.style.filter = lit ? 'url(#segGlow)' : '';
+        });
+      }
+    },
+
+    lcd1602: lcdPart(false),
+    lcd1602i2c: lcdPart(true)
   };
+
+  // 16x2 character LCD with an HD44780 controller (js/lcd1602.js). The parallel version
+  // exposes RS, RW, E, D4..D7 of its 16-pin header (4-bit mode; an unwired RW counts as tied
+  // to GND, D0..D3, V0 and the backlight pins A / K are not wired); the I2C version has a
+  // PCF8574 backpack with GND, VCC, SDA, SCL (its pull-ups are applied in app.js applyInputs).
+  function lcdPart(i2c) {
+    const HEADER = ['VSS', 'VDD', 'V0', 'RS', 'RW', 'E', 'D0', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'A', 'K'];
+    const hx = i => 24 + 16 * i;
+    const COLORS = {
+      blue: { bg: '#2457d4', off: '#132f72', dot: '#2d62e2', lit: '#eef4ff' },
+      green: { bg: '#9cc43c', off: '#56682a', dot: '#91b836', lit: '#1d2810' }
+    };
+    const P = 2.9, D = 2.4, PITCH = 16.8, X0 = 26.75, Y0 = 52.3, ROW = 28.2;   // dot pitch, dot size, cell pitch
+    const cellXY = i => [X0 + PITCH * (i % 16), Y0 + ROW * Math.floor(i / 16)];
+    const dots = (x, y, rows) => {
+      let d = '';
+      for (let r = 0; r < 8; r++) {
+        for (let k = 0; k < 5; k++) if ((rows[r] >> (4 - k)) & 1) d += `M${(x + k * P).toFixed(1)} ${(y + r * P).toFixed(1)}h${D}v${D}h-${D}z`;
+      }
+      return d;
+    };
+    const FULL = new Uint8Array(8).fill(0x1F);
+    const pins = i2c ? [
+      { name: 'SDA', label: 'SDA (I2C data, open drain)', x: 58, y: 160, dir: 'down' },
+      { name: 'SCL', label: 'SCL (I2C clock)', x: 76, y: 160, dir: 'down' }
+    ] : ['RS', 'RW', 'E', 'D4', 'D5', 'D6', 'D7'].map(n => ({
+      name: n, label: { RS: 'RS (0 = instruction, 1 = data)', RW: 'RW (0 = write, 1 = read)', E: 'E (enable)' }[n] || n,
+      x: hx(HEADER.indexOf(n)), y: 0, dir: 'up'
+    }));
+    const power = i2c
+      ? [{ name: 'GND', label: 'GND', x: 22, y: 160, dir: 'down' }, { name: 'VCC', label: 'VCC', x: 40, y: 160, dir: 'down' }]
+      : [{ name: 'VSS', label: 'VSS (GND)', x: hx(0), y: 0, dir: 'up' }, { name: 'VDD', label: 'VDD', x: hx(1), y: 0, dir: 'up' }];
+    const gnd = i2c ? 'GND' : 'VSS', vcc = i2c ? 'VCC' : 'VDD';
+    return {
+      title: i2c ? 'LCD1602 (I2C)' : 'LCD1602 (4-bit parallel)',
+      w: 320, h: i2c ? 160 : 136,
+      pins, power,
+      supplies: ['GND', '3V3', '5V'],
+      rail: (c, pin) => pin === gnd ? 'GND' : c.props.vcc === '3V3' ? '3V3' : '5V',
+      setRail(c, pin, r) { if (pin === vcc && r !== 'GND') c.props.vcc = r; },
+      defaults: i2c ? { color: 'blue', addr: '27', vcc: '5V' } : { color: 'blue', vcc: '5V' },
+      props: [
+        { key: 'color', label: 'Display', type: 'select', options: [['blue', 'Blue, white characters'], ['green', 'Yellow-green, dark characters']] },
+        ...(i2c ? [{ key: 'addr', label: 'I2C address', type: 'select', options: [['27', '0x27 (PCF8574)'], ['3F', '0x3F (PCF8574A)']] }] : [])
+      ],
+      render(c, o) {
+        const col = COLORS[c.props.color] || COLORS.blue;
+        const manual = o && !o.auto;
+        let grid = '', cells = '';
+        for (let i = 0; i < 32; i++) {
+          const [x, y] = cellXY(i);
+          grid += dots(x, y, FULL);
+          cells += `<path class="lcd-c" d=""/>`;
+        }
+        const header = HEADER.map((n, i) => {
+          const p = pins.concat(power).find(q => q.x === hx(i) && q.y === 0);
+          const leg = p && (pins.includes(p) || manual);
+          return `${leg ? `<path d="M${hx(i)} 0 V11" class="leg"/>` : ''}
+            <rect x="${hx(i) - 3}" y="11" width="6" height="6" rx="${i2c ? 3 : 0}" fill="#c9a74a"/>
+            ${i2c ? '' : `<text x="${hx(i)}" y="27" class="tiny light" text-anchor="middle">${n}</text>`}`;
+        }).join('');
+        const backpack = !i2c ? '' : `
+          <rect x="8" y="122" width="118" height="30" rx="2" fill="#1d5b8f" stroke="#123a5c" stroke-width="1.2"/>
+          <text x="96" y="134" class="tiny light" text-anchor="middle">PCF8574</text>
+          <text x="96" y="144" class="tiny light" text-anchor="middle">0x${esc(c.props.addr || '27')}</text>
+          ${power.concat(pins).map(p => `${pins.includes(p) || manual ? `<path d="M${p.x} 150 V160" class="leg"/>` : ''}
+            <rect x="${p.x - 3}" y="144" width="6" height="6" fill="#c9a74a"/>
+            <text x="${p.x}" y="140" class="tiny light" text-anchor="middle">${p.name}</text>`).join('')}`;
+        return `
+          <rect x="0" y="6" width="320" height="124" rx="3" fill="#226b3a" stroke="#134524" stroke-width="1.5"/>
+          ${[[8, 14], [312, 14], [8, 122], [312, 122]].map(([x, y]) => `<circle cx="${x}" cy="${y}" r="3" fill="#0e2a17"/>`).join('')}
+          ${header}
+          <rect x="12" y="32" width="296" height="92" rx="2" fill="#16181b"/>
+          <rect class="lcd-bg" x="22" y="42" width="276" height="72" fill="${col.off}"/>
+          <path class="lcd-grid" d="${grid}" fill="${col.off}"/>
+          <g class="lcd-text" fill="${col.lit}">${cells}</g>
+          ${backpack}`;
+      },
+      update(el, c, ctx) {
+        const col = COLORS[c.props.color] || COLORS.blue;
+        const dev = ctx.powered ? ctx.device : null;
+        const lcd = dev && (i2c ? dev.lcd : dev);
+        const light = !!dev && (!i2c || dev.backlight);
+        if (el._light !== light) {
+          el._light = light;
+          el.querySelector('.lcd-bg').setAttribute('fill', light ? col.bg : col.off);
+          el.querySelector('.lcd-grid').setAttribute('fill', light ? col.dot : col.off);
+        }
+        const scr = lcd && lcd.on ? lcd.screen() : null;
+        const blinkOn = Math.floor(performance.now() / 400) % 2 === 0;   // the HD44780 blinks every 409.6 ms
+        const cells = el._cellEls || (el._cellEls = el.querySelectorAll('.lcd-c'));
+        const keys = el._keys || (el._keys = []);
+        for (let i = 0; i < 32; i++) {
+          const r = i >> 4, k = i & 15;
+          let code = scr ? scr.rows[r][k] : -1, rows = null;
+          const cur = scr && scr.cursor && scr.cursor.row === r && scr.cursor.col === k;
+          const block = cur && scr.blink && blinkOn, line = cur && scr.underline;
+          const key = `${code}|${block}|${line}|${code >= 0 && code < 16 ? lcd.glyph(code).join() : ''}`;
+          if (keys[i] === key) continue;
+          keys[i] = key;
+          if (block) rows = FULL;
+          else {
+            rows = Uint8Array.from(lcd && code >= 0 ? lcd.glyph(code) : FULL.map(() => 0));
+            if (line) rows[7] = 0x1F;
+          }
+          const [x, y] = cellXY(i);
+          cells[i].setAttribute('d', dots(x, y, rows));
+        }
+      }
+    };
+  }
 
   root.PARTS = PARTS;
   root.LED_COLORS = LED_COLORS;

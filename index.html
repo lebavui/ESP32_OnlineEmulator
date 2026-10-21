@@ -22,33 +22,41 @@
     <div class="brand">
       <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#18202e"/><rect x="8" y="8" width="16" height="16" rx="2" fill="#30d158"/><path d="M4 12h4M4 20h4M24 12h4M24 20h4M12 4v4M20 4v4M12 24v4M20 24v4" stroke="#c9a74a" stroke-width="2"/></svg>
       <span class="name">RV<b>Sim</b> C3</span>
-      <span class="tagline">ESP32-C3 · RISC-V assembly simulator</span>
     </div>
 
     <nav class="tb-group">
+      <select id="boardSel" title="Development board shown on the breadboard (pin layout, on-board LED and buttons)"></select>
       <div class="menu">
         <button type="button">Examples ▾</button>
-        <div class="menu-list wide" id="examplesMenu"></div>
+        <div class="menu-list wide scroll" id="examplesMenu"></div>
       </div>
-      <button type="button" id="btnNew">New</button>
-      <button type="button" id="btnOpen">Open…</button>
+      <!-- Toolbar icons: Google Material Icons (note_add, folder_open, save, share, add_box, delete_sweep, settings, build, zoom_out_map, add, remove; Step = redo above a dot; Apache License 2.0), inlined so the page works offline -->
+      <button type="button" class="icon" id="btnNew" title="New project" aria-label="New project"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 14h-3v3h-2v-3H8v-2h3v-3h2v3h3v2zm-3-7V3.5L18.5 9H13z"/></svg></button>
+      <button type="button" class="icon" id="btnOpen" title="Open a project (.json) or source file (.S)" aria-label="Open"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg></button>
       <input type="file" id="fileInput" accept=".json,.s,.S,.asm,.txt" hidden>
       <div class="menu">
-        <button type="button" id="btnSave">Save ▾</button>
+        <button type="button" class="icon" id="btnSave" title="Save the project or the source to a file" aria-label="Save"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg>▾</button>
         <div class="menu-list">
           <button type="button" id="saveJson"><b>Project (.json)</b><span>Code, parts and wiring</span></button>
           <button type="button" id="saveAsm"><b>Source (.S)</b><span>Assembly code only</span></button>
         </div>
       </div>
-      <button type="button" id="btnShare" title="Copy a link containing the whole project">Share</button>
+      <button type="button" class="icon" id="btnShare" title="Share: copy a link containing the whole project" aria-label="Share"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/></svg></button>
       <button type="button" class="icon" id="btnTheme" title="Switch to light theme" aria-label="Switch to light theme">☀</button>
     </nav>
 
+    <div class="tb-group part-controls">
+      <button type="button" class="icon" id="btnAddPart" title="Add a part to the breadboard" aria-label="Add part"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M19 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/></svg></button>
+      <button type="button" class="icon" id="btnClearParts" title="Remove all parts from the breadboard" aria-label="Remove all parts"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12z"/></svg></button>
+      <button type="button" class="icon" id="btnSettings" title="Breadboard settings: power supply, wire style and part names" aria-label="Breadboard settings"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg><span class="badge" id="powerBadge" title="Power supply: manual" hidden></span></button>
+    </div>
+
     <div class="tb-group sim-controls">
-      <button type="button" id="btnRun" class="run" title="Run / Resume (F5)">▶ Run</button>
-      <button type="button" id="btnPause" title="Pause (F5)">❚❚</button>
-      <button type="button" id="btnStep" title="Step one instruction (F10)">Step</button>
-      <button type="button" id="btnStop" class="stop" title="Stop &amp; reset">■</button>
+      <button type="button" class="icon" id="btnAssemble" title="Assemble: check the program for errors" aria-label="Assemble"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg></button>
+      <button type="button" class="icon run" id="btnRun" title="Run (F5)" aria-label="Run"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M4 2.5v11l9.5-5.5z" fill="currentColor"/></svg></button>
+      <button type="button" class="icon" id="btnPause" title="Pause (F5)" aria-label="Pause">❚❚</button>
+      <button type="button" class="icon" id="btnStep" title="Step one instruction (F10)" aria-label="Step"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M18.4 8.6C16.55 6.99 14.15 6 11.5 6c-4.65 0-8.58 3.03-9.96 7.22L3.9 14c1.05-3.19 4.05-5.5 7.6-5.5 1.95 0 3.73.72 5.12 1.88L13 14h9V5l-3.6 3.6z"/><circle cx="12" cy="19" r="2.5"/></svg></button>
+      <button type="button" class="icon stop" id="btnStop" title="Stop &amp; reset" aria-label="Stop">■</button>
       <select id="speedSel" title="Simulation clock">
         <option value="160000000">Real-time (160 MHz)</option>
         <option value="16000000">1/10 speed</option>
@@ -64,7 +72,7 @@
 
     <div class="tb-group hw-controls">
       <div class="menu">
-        <button type="button" id="btnHw" title="Build the program for a real ESP32-C3 and run it on a board connected over USB">⚡ Hardware ▾</button>
+        <button type="button" id="btnHw" title="Hardware: build the program for a real ESP32-C3 and run it on a board connected over USB" aria-label="Hardware">⚡ ▾</button>
         <div class="menu-list wide" id="hwMenu">
           <div class="menu-head" title="Browsers don't tell web pages the COM / tty name of a port, only the USB chip behind it. The browser's own port list shows the names.">Serial port</div>
           <div id="hwPorts"></div>
@@ -89,8 +97,6 @@
       <div class="pane-head">
         <span class="file-tab">main.S</span>
         <span id="modFlag" class="mod"></span>
-        <span class="spacer"></span>
-        <button type="button" id="btnAssemble" title="Check the program for errors">Assemble</button>
       </div>
       <div class="editor">
         <div class="gutter" id="gutter"></div>
@@ -108,24 +114,14 @@
 
     <section class="pane right-pane">
       <div class="stage-wrap">
-        <div class="stage-toolbar">
-          <select id="boardSel" title="Development board shown on the breadboard (pin layout, on-board LED and buttons)"></select>
-          <span class="dim">Add part:</span>
-          <button type="button" data-add="led"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 9V6a4 4 0 0 1 8 0v3z" fill="#ff3b30"/><path d="M6 9v6M10 9v4" stroke="currentColor"/></svg>LED</button>
-          <button type="button" data-add="button"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1.5" y="1.5" width="13" height="13" rx="2" fill="none" stroke="currentColor"/><circle cx="8" cy="8" r="4" fill="#e5383b"/></svg>Button</button>
-          <button type="button" data-add="switch"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1" y="4" width="14" height="8" rx="1.5" fill="#2f6fd6"/><rect x="2.5" y="5.5" width="5" height="5" fill="#fff"/></svg>Switch</button>
-          <button type="button" data-add="sevenseg"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M5 2h6M4 3v4.5M12 3v4.5M5 8h6M4 9v4.5M12 9v4.5M5 14h6" stroke="#ff3b30" stroke-width="1.6"/></svg>7-Segment</button>
-          <button type="button" data-add="matrix" title="8×8 LED matrix module(s) with a MAX7219 driver (DIN, CS, CLK)"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1" y="1" width="14" height="14" rx="1.5" fill="#1d5b8f"/><g fill="#ff3b30"><circle cx="4.5" cy="4.5" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="11.5" cy="11.5" r="1.3"/><circle cx="11.5" cy="4.5" r="1.3"/><circle cx="4.5" cy="11.5" r="1.3"/></g></svg>Matrix</button>
-          <span class="spacer"></span>
-          <button type="button" id="btnSettings" title="Breadboard settings: power supply and wire style">⚙ Settings<span class="badge" id="powerBadge" hidden>manual power</span></button>
-          <button type="button" class="icon" id="zoomOut" title="Zoom out">−</button>
-          <button type="button" class="icon" id="zoomIn" title="Zoom in">+</button>
-          <button type="button" class="icon" id="zoomFit" title="Fit to view">⤢</button>
-        </div>
         <svg id="stage" role="application" aria-label="Breadboard: ESP32-C3 board and parts"></svg>
         <div class="stage-hint" id="stageHint" hidden></div>
         <div class="inspector" id="inspector" hidden></div>
-        <div class="stage-help">Drag parts to move · click a part pin then a board GPIO pin to wire · scroll to zoom · drag background to pan</div>
+        <div class="zoom-ctl">
+          <button type="button" class="icon" id="zoomFit" title="Fit to view" aria-label="Fit to view"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M15 3l2.3 2.3-2.89 2.87 1.42 1.42L18.7 6.7 21 9V3zM3 9l2.3-2.3 2.87 2.89 1.42-1.42L6.7 5.3 9 3H3zm6 12l-2.3-2.3 2.89-2.87-1.42-1.42L5.3 17.3 3 15v6zm12-6l-2.3 2.3-2.87-2.89-1.42 1.42 2.89 2.87L15 21h6z"/></svg></button>
+          <button type="button" class="icon" id="zoomIn" title="Zoom in" aria-label="Zoom in"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg></button>
+          <button type="button" class="icon" id="zoomOut" title="Zoom out" aria-label="Zoom out"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M19 13H5v-2h14v2z"/></svg></button>
+        </div>
       </div>
 
       <div class="splitter h" id="splitH" title="Drag to resize">
@@ -204,9 +200,10 @@
           <section id="tab-docs" class="docs" hidden>
             <h3>Quick start</h3>
             <ol>
-              <li>Write RISC-V (RV32IM) assembly in the editor, or pick one of the <b>Examples</b>.</li>
-              <li>Add parts with the toolbar above the board. Wire a part by clicking one of its pins and then a <b>GPIO pin</b> on the board (or choose the GPIO in the part's settings panel). Ground / 3V3 are connected automatically while <b>Power supply</b> is set to Automatic in <b>⚙ Settings</b> (above the breadboard, on the right). <b>Wire style</b> in the same dialog switches between curved wires and horizontal / vertical wires; with the latter, click while wiring to place points. If a point is diagonal to the previous one, the wire bends at a right angle, first along the direction you moved the mouse (move back near the previous point to choose again). Backspace removes the last point. To edit a wire afterwards, click it: drag a round handle to move a corner, drag a bar handle to move a segment (this adds corners where the segment meets a pin), and double-click a corner to remove it. Set Power supply to Manual to wire each part's supply pin to a GND or 3V3 pin yourself: a part without power doesn't work, and the rail you choose sets its wiring mode (for example, an LED's fixed leg on 3V3 makes it active-low).</li>
-              <li>Press <b>▶ Run</b> (F5). Use <b>Step</b> (F10), breakpoints (click a line number) and <code>ebreak</code> to debug. Choose a slow speed such as <i>10 Hz (trace)</i> to watch each instruction execute.</li>
+              <li>Write RISC-V (RV32IM) assembly in the editor, or pick one of the <b>Examples</b> (top bar).</li>
+              <li>Add parts with the add-part button in the top bar (a dialog lists every part); the button next to it removes all parts. Wire a part by clicking one of its pins and then a <b>GPIO pin</b> on the board (or choose the GPIO in the part's settings panel). Ground / 3V3 are connected automatically while <b>Power supply</b> is set to Automatic in the <b>Settings</b> dialog (gear button in the top bar; it shows an orange dot while Power supply is Manual). <b>Part names</b> in the same dialog shows or hides the names under the parts (led1, seg1, …). <b>Wire style</b> switches between curved wires and horizontal / vertical wires; with the latter, click while wiring to place points. If a point is diagonal to the previous one, the wire bends at a right angle, first along the direction you moved the mouse (move back near the previous point to choose again). Backspace removes the last point. To edit a wire afterwards, click it: drag a round handle to move a corner, drag a bar handle to move a segment (this adds corners where the segment meets a pin), and double-click a corner to remove it. Set Power supply to Manual to wire each part's supply pin to a GND or 3V3 pin yourself: a part without power doesn't work, and the rail you choose sets its wiring mode (for example, an LED's fixed leg on 3V3 makes it active-low).</li>
+              <li>On the breadboard: drag a part to move it, drag the background to pan, and scroll to zoom (or use the fit / zoom in / zoom out buttons at the top right of the breadboard). Click a part to open its settings panel.</li>
+              <li>Press the green <b>▶</b> (Run, F5); the wrench button next to it only assembles and lists errors. Use <b>Step</b> (the arrow over a dot, F10), breakpoints (click a line number) and <code>ebreak</code> to debug. Choose a slow speed such as <i>10 Hz (trace)</i> to watch each instruction execute.</li>
             </ol>
 
             <h3>Memory map</h3>
@@ -296,7 +293,7 @@
             <b>Labels:</b> <code>name:</code> and numeric local labels (<code>1:</code> referenced as <code>1b</code> / <code>1f</code>). Comments start with <code>#</code>, <code>//</code> or <code>;</code>, or use <code>/* … */</code>.</p>
 
             <h3>Boards</h3>
-            <p>Pick the board above the breadboard. Wires to GPIOs the new board doesn't have are removed.</p>
+            <p>Pick the board in the list at the left of the top bar. Wires to GPIOs the new board doesn't have are removed.</p>
             <table class="grid">
               <tr><th>Board</th><th>GPIOs on the headers</th><th>On the board</th></tr>
               <tr><td>ESP32-C3-DevKitM-1</td><td>0–10, 18–21</td><td>BOOT button (GPIO9, active low), RST, USB-UART bridge on UART0. The RGB LED on GPIO8 is not modelled.</td></tr>
@@ -319,8 +316,45 @@
             </table>
             <p>At power-up (and whenever the simulation is reset) the chip is in shutdown with every register 0, so a program must at least set the scan limit and leave shutdown. In a chain, send one word per chip between CS LOW and CS HIGH: the first word ends up in the chip farthest from the board (the rightmost module); use no-ops for chips you don't want to change. The module is powered from 5V (or 3V3) and GND when Power supply is Manual. See the <i>LED matrix (MAX7219)</i> example.</p>
 
+            <h3>RGB LED</h3>
+            <p>Four legs: <b>R</b>, <b>G</b>, <b>B</b> and the common leg. With a common cathode (to GND) a colour lights while its pin is HIGH; with a common anode (to 3V3) while its pin is LOW (and the chip drives it). The colour shown mixes the three pins by their duty cycle, so software PWM gives any colour: see the <i>RGB LED colour wheel</i> example.</p>
+
+            <h3>4-digit display (TM1637)</h3>
+            <p>A 4-digit 7-segment module with a TM1637 driver and two signal pins, <b>CLK</b> and <b>DIO</b>, each pulled up to VCC by 10k on the module (powered from 3V3 or 5V; on a real board use 3V3 so the pull-ups don't put 5V on the ESP32-C3 pins). The protocol looks like I2C but has no address and sends bytes LSB first:</p>
+            <ul>
+              <li><b>Start</b>: DIO goes LOW while CLK is HIGH. <b>Stop</b>: DIO goes HIGH while CLK is HIGH. Otherwise change DIO only while CLK is LOW; the chip reads it on each rising edge of CLK.</li>
+              <li>After 8 bits the chip pulls DIO LOW from the 8th falling edge of CLK to the 9th (ACK). Drive DIO open-drain: set <code>GPIO_ENABLE</code> to pull it LOW (with <code>GPIO_OUT</code> = 0), clear it to release the line. A pin driven HIGH by the ESP32-C3 hides the ACK. To read the ACK, set <code>FUN_IE</code> in the pin's IO_MUX register.</li>
+            </ul>
+            <table class="grid">
+              <tr><th>Command</th><th>Byte</th><th>Meaning</th></tr>
+              <tr><td>Data</td><td>0x40 / 0x44</td><td>Write the display registers with auto-increment / at a fixed address</td></tr>
+              <tr><td>Address</td><td>0xC0 + n</td><td>The following bytes of the same transfer (up to the stop) go to digit n (0–3 from the left) and on</td></tr>
+              <tr><td>Display control</td><td>0x80 / 0x88 + b</td><td>Display off / on with brightness b = 0–7 (pulse width 1/16, 2/16, 4/16, 10/16 … 14/16)</td></tr>
+            </table>
+            <p>A digit byte has segment a in bit 0 … g in bit 6; bit 7 is the colon (on digit 1, clock modules) or the digit's decimal point (choose <b>Bit 7</b> in the part's settings). The simulated chip starts with the display off and every digit blank. Key scanning is not modelled (a read returns 0xFF). See the <i>4-digit clock (TM1637)</i> example.</p>
+
+            <h3>LCD1602 (HD44780)</h3>
+            <p>A 16×2 character LCD with an HD44780-compatible controller, in two versions: <b>LCD1602</b> wired in 4-bit mode with 7 wires (<b>RS</b>, <b>RW</b>, <b>E</b>, <b>D4</b>–<b>D7</b>; an unwired RW counts as tied to GND, D0–D3 and V0 are not used, the backlight is on while the LCD has power), and <b>LCD I2C</b> with a PCF8574 backpack (<b>SDA</b>, <b>SCL</b>, address 0x27 or 0x3F). Both are powered from 5V (or 3V3).</p>
+            <ul>
+              <li>The controller takes a nibble on the falling edge of E. After power-up it is in 8-bit mode: send the nibble 3 three times (wait &gt; 4.1 ms after the first, &gt; 100 µs after the second), then 2. From then on each byte is two nibbles, high first; RS = 0 for an instruction, 1 for a character.</li>
+              <li>The controller is busy for 15 ms after power-up (here: after the program starts), 1.52 ms after clear / home and 37 µs after other bytes. A byte sent while it is busy is ignored and the Messages panel warns. Wait, or read the busy flag: with RS = 0 and RW = 1 the LCD drives D4–D7 while E is HIGH, D7 of the first nibble is the busy flag (turn the ESP32-C3 pins into inputs with <code>FUN_IE</code> set while reading).</li>
+              <li>I2C backpack: each byte written to the PCF8574 sets P0 = RS, P1 = RW, P2 = E, P3 = backlight, P4–P7 = D4–D7, so one nibble is two writes (E = 1, then E = 0). I2C starts with SDA falling while SCL is HIGH and stops with SDA rising while SCL is HIGH; bytes go MSB first and the PCF8574 pulls SDA LOW on the 9th clock to acknowledge. Drive SDA and SCL open-drain as for the TM1637; the backpack has pull-ups. A read returns the port pins (pins written 1 read what the LCD drives).</li>
+            </ul>
+            <table class="grid">
+              <tr><th>Instruction</th><th>Byte</th><th>Meaning</th></tr>
+              <tr><td>Clear display</td><td>0x01</td><td>All spaces, address 0, increment</td></tr>
+              <tr><td>Return home</td><td>0x02</td><td>Address 0, undo display shift</td></tr>
+              <tr><td>Entry mode</td><td>0x04 + 2·I/D + S</td><td>I/D = 1: address increments; S = 1: the display shifts with each character</td></tr>
+              <tr><td>Display control</td><td>0x08 + 4·D + 2·C + B</td><td>Display on, underline cursor, blinking block</td></tr>
+              <tr><td>Shift</td><td>0x10 + 8·S/C + 4·R/L</td><td>Move the cursor (S/C = 0) or shift the display (S/C = 1) right (R/L = 1) or left</td></tr>
+              <tr><td>Function set</td><td>0x20 + 16·DL + 8·N</td><td>DL = 0: 4-bit interface, N = 1: 2 lines (0x28 for this LCD)</td></tr>
+              <tr><td>Set CGRAM address</td><td>0x40 + a</td><td>Following characters define custom characters 0–7 (8 rows each, bits 4–0)</td></tr>
+              <tr><td>Set DDRAM address</td><td>0x80 + a</td><td>Line 1 starts at 0x00, line 2 at 0x40</td></tr>
+            </table>
+            <p>Characters 0x20–0x7F use the HD44780 A00 font (0x5C is ¥, 0x7E / 0x7F are arrows), 0x00–0x07 are the custom characters, 0xDF is ° and 0xFF a full block; other codes (Japanese characters) show blank. See the <i>LCD1602</i> examples.</p>
+
             <h3>Running on a real board</h3>
-            <p>Connect the board over USB and use the <b>⚡ Hardware</b> menu (Chrome or Edge on a desktop, page opened from <code>https://</code> or <code>localhost</code>; other browsers can only download the .bin):</p>
+            <p>Connect the board over USB and use the <b>⚡ Hardware</b> menu in the top bar (Chrome or Edge on a desktop, page opened from <code>https://</code> or <code>localhost</code>; other browsers can only download the .bin):</p>
             <ul>
               <li><b>Run on board (RAM)</b> resets the board into its ROM bootloader, loads the program into SRAM and starts it. Nothing is written to flash.</li>
               <li><b>Flash to board</b> writes a firmware image at flash offset 0x0 and restarts the board, so the program runs at every power-up (it replaces whatever was in flash).</li>
@@ -344,6 +378,23 @@
     <div class="hp-barrow"><div class="hp-bar"><div id="hpFill"></div></div><span class="mono" id="hpPct"></span></div>
     <div class="hp-detail" id="hpDetail"></div>
   </div>
+  <dialog class="dlg dlg-wide" id="partsDlg" aria-labelledby="partsTitle">
+    <form method="dialog">
+      <div class="dlg-head"><b id="partsTitle">Add a part</b><span class="spacer"></span><button type="submit" class="icon" title="Close" aria-label="Close">×</button></div>
+      <div class="part-grid" id="partGrid">
+        <button type="button" class="part-pick" data-add="led"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 9V6a4 4 0 0 1 8 0v3z" fill="#ff3b30"/><path d="M6 9v6M10 9v4" stroke="currentColor"/></svg><span><b>LED</b><span>LED on one GPIO, lit when the pin is HIGH (or LOW when wired to 3V3)</span></span></button>
+        <button type="button" class="part-pick" data-add="rgbled"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 9V6a5 5 0 0 1 10 0v3z" fill="#c86bff"/><path d="M4.5 9v6M7 9v7M9.5 9v6M12 9v6" stroke="currentColor"/></svg><span><b>RGB LED</b><span>RGB LED: red, green and blue pins and a common cathode / anode</span></span></button>
+        <button type="button" class="part-pick" data-add="button"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1.5" y="1.5" width="13" height="13" rx="2" fill="none" stroke="currentColor"/><circle cx="8" cy="8" r="4" fill="#e5383b"/></svg><span><b>Push button</b><span>Push button that connects a GPIO to GND or 3V3 (needs a pull-up / pull-down)</span></span></button>
+        <button type="button" class="part-pick" data-add="switch"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1" y="4" width="14" height="8" rx="1.5" fill="#2f6fd6"/><rect x="2.5" y="5.5" width="5" height="5" fill="#fff"/></svg><span><b>Slide switch</b><span>Slide switch that puts a GPIO on GND or 3V3</span></span></button>
+        <button type="button" class="part-pick" data-add="sevenseg"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M5 2h6M4 3v4.5M12 3v4.5M5 8h6M4 9v4.5M12 9v4.5M5 14h6" stroke="#ff3b30" stroke-width="1.6"/></svg><span><b>7-segment display</b><span>Single 7-segment digit: segments a–g and dp on 8 GPIOs, common cathode or anode</span></span></button>
+        <button type="button" class="part-pick" data-add="matrix"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="1" y="1" width="14" height="14" rx="1.5" fill="#1d5b8f"/><g fill="#ff3b30"><circle cx="4.5" cy="4.5" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="11.5" cy="11.5" r="1.3"/><circle cx="11.5" cy="4.5" r="1.3"/><circle cx="4.5" cy="11.5" r="1.3"/></g></svg><span><b>LED matrix (MAX7219)</b><span>8×8 LED matrix module(s) with a MAX7219 driver (DIN, CS, CLK)</span></span></button>
+        <button type="button" class="part-pick" data-add="tm1637"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="0.5" y="3" width="15" height="10" rx="1.5" fill="#1d5b8f"/><path d="M2.5 5.5h2.5M2.5 8h2.5M2.5 10.5h2.5M5 5.5v5M8.5 5.5h2.5M11 5.5v5M8.5 10.5h2.5M8.5 8h2.5" stroke="#ff3b30" stroke-width="1.1"/><circle cx="7" cy="6.8" r=".6" fill="#ff3b30"/><circle cx="7" cy="9.3" r=".6" fill="#ff3b30"/></svg><span><b>4-digit display (TM1637)</b><span>4-digit 7-segment display module with a TM1637 driver (CLK, DIO)</span></span></button>
+        <button type="button" class="part-pick" data-add="lcd1602"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="0.5" y="3" width="15" height="10" rx="1" fill="#226b3a"/><rect x="2" y="5" width="12" height="6" fill="#2457d4"/><path d="M3 7h1.5M5.5 7h1.5M8 7h1.5M3 9h1.5M5.5 9h1.5" stroke="#eef4ff" stroke-width="1"/></svg><span><b>LCD1602 (4-bit parallel)</b><span>16×2 character LCD (HD44780), 4-bit parallel: RS, RW, E, D4–D7</span></span></button>
+        <button type="button" class="part-pick" data-add="lcd1602i2c"><svg viewBox="0 0 16 16" width="14" height="14"><rect x="0.5" y="3" width="15" height="10" rx="1" fill="#226b3a"/><rect x="2" y="5" width="12" height="6" fill="#2457d4"/><path d="M3 7h1.5M5.5 7h1.5M8 7h1.5M3 9h1.5M5.5 9h1.5" stroke="#eef4ff" stroke-width="1"/></svg><span><b>LCD1602 (I2C)</b><span>16×2 character LCD with a PCF8574 I2C backpack: SDA, SCL</span></span></button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="dlg" id="settingsDlg" aria-labelledby="settingsTitle">
     <form method="dialog" id="settingsForm">
       <div class="dlg-head"><b id="settingsTitle">Breadboard settings</b><span class="spacer"></span><button type="submit" class="icon" title="Close" aria-label="Close">×</button></div>
@@ -362,6 +413,13 @@
         <label class="opt"><input type="radio" name="wires" value="ortho">
           <span><b>Horizontal / vertical</b><span>While wiring, click to place points; a diagonal step bends at a right angle along the way you first move the mouse. Backspace removes the last point.</span></span></label>
       </fieldset>
+      <fieldset>
+        <legend>Part names</legend>
+        <label class="opt"><input type="radio" name="labels" value="show">
+          <span><b>Show</b><span>Each part's name (led1, seg1, lcd1, …) is shown under it.</span></span></label>
+        <label class="opt"><input type="radio" name="labels" value="hide">
+          <span><b>Hide</b><span>A cleaner breadboard; the name still appears in the part's settings panel.</span></span></label>
+      </fieldset>
       <div class="dlg-foot"><span class="dim">Changes apply right away and are saved with the project.</span><span class="spacer"></span><button type="submit" class="run">Done</button></div>
     </form>
   </dialog>
@@ -374,6 +432,8 @@
   <script src="js/flasher.js"></script>
   <script src="js/boards.js"></script>
   <script src="js/max7219.js"></script>
+  <script src="js/tm1637.js"></script>
+  <script src="js/lcd1602.js"></script>
   <script src="js/components.js"></script>
   <script src="js/examples.js"></script>
   <script src="js/app.js"></script>

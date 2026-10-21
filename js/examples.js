@@ -807,6 +807,838 @@ ${DELAY_MS}`,
       ]
     },
     {
+      id: 'rgb',
+      name: 'RGB LED colour wheel',
+      description: 'Software PWM on three GPIOs fades a common-cathode RGB LED around the colour wheel: red, green, blue and every mix in between.',
+      code: `# ============================================================
+#  RGB LED colour wheel with software PWM.
+#  Each PWM period has 256 steps; a colour's pin is HIGH while
+#  the step is below its duty (0..255), so its LED is on for
+#  duty/256 of the time. The wheel has 768 positions: red fades
+#  to green, green to blue, blue back to red.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT,          0x04
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ R_PIN,             2
+        .equ G_PIN,             3
+        .equ B_PIN,             10
+        .equ PERIODS,           250      # PWM periods per wheel position (speed)
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      t0, (1 << R_PIN) | (1 << G_PIN) | (1 << B_PIN)
+        sw      t0, GPIO_ENABLE_W1TS(s0)
+        li      s4, 0                   # position on the wheel, 0..767
+
+wheel:
+        # s1, s2, s3 = red, green, blue duty (0..255) at position s4
+        andi    t0, s4, 255             # step within the current third
+        li      t1, 255
+        sub     t1, t1, t0              # 255 - step
+        srli    t2, s4, 8               # which third: 0, 1 or 2
+        li      s1, 0
+        li      s2, 0
+        li      s3, 0
+        beqz    t2, 1f
+        li      t3, 1
+        beq     t2, t3, 2f
+        mv      s3, t1                  # third 2: blue -> red
+        mv      s1, t0
+        j       3f
+1:      mv      s1, t1                  # third 0: red -> green
+        mv      s2, t0
+        j       3f
+2:      mv      s2, t1                  # third 1: green -> blue
+        mv      s3, t0
+3:      li      s5, PERIODS
+4:      call    pwm_period
+        addi    s5, s5, -1
+        bnez    s5, 4b
+        addi    s4, s4, 1
+        li      t0, 768
+        bltu    s4, t0, wheel
+        li      s4, 0
+        j       wheel
+
+# ------------------------------------------------------------
+# pwm_period: one PWM period of 256 steps with duties s1, s2, s3.
+# Every step takes the same number of instructions (no branches
+# per colour), so the time a pin is HIGH matches its duty.
+# Uses s0 = GPIO_BASE. Clobbers t0, t1, t2, t5.
+# ------------------------------------------------------------
+pwm_period:
+        li      t0, 0                   # step
+        li      t5, 256
+1:      sltu    t1, t0, s1              # 1 while step < red duty
+        slli    t1, t1, R_PIN
+        sltu    t2, t0, s2
+        slli    t2, t2, G_PIN
+        or      t1, t1, t2
+        sltu    t2, t0, s3
+        slli    t2, t2, B_PIN
+        or      t1, t1, t2
+        sw      t1, GPIO_OUT(s0)
+        addi    t0, t0, 1
+        bltu    t0, t5, 1b
+        ret
+`,
+      components: [
+        { id: 'rgb1', type: 'rgbled', x: 300, y: 100, props: { common: 'cathode' }, conn: { R: 2, G: 3, B: 10 } }
+      ]
+    },
+    {
+      id: 'tm1637',
+      name: '4-digit clock (TM1637)',
+      description: 'Bit-bang the TM1637 two-wire protocol (CLK, DIO with ACK) to count minutes and seconds on a 4-digit display with a blinking colon.',
+      code: `# ============================================================
+#  MM:SS clock on a 4-digit TM1637 display module.
+#  The TM1637 protocol: start = DIO falls while CLK is HIGH,
+#  stop = DIO rises while CLK is HIGH; bytes go LSB first, DIO
+#  is read on each rising CLK edge, and after 8 bits the chip
+#  pulls DIO LOW for one clock (ACK).
+#  Both lines are driven open-drain: GPIO_OUT stays 0, enabling
+#  the output pulls the line LOW, disabling it lets the module's
+#  pull-up take it HIGH. That way the chip can drive DIO for the
+#  ACK, which we read through GPIO_IN.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT_W1TC,     0x0C
+        .equ GPIO_ENABLE_W1TS,  0x24     # pull LOW
+        .equ GPIO_ENABLE_W1TC,  0x28     # release (HIGH)
+        .equ GPIO_IN,           0x3C
+        .equ IO_MUX_BASE,       0x60009000
+        .equ FUN_WPU,           1 << 8   # weak pull-up
+        .equ FUN_IE,            1 << 9   # input enable
+        .equ SYSTIMER_BASE,     0x60023000
+        .equ CLK_PIN,           2
+        .equ DIO_PIN,           3
+
+        # TM1637 commands
+        .equ CMD_DATA,          0x40     # write display registers, auto-increment
+        .equ CMD_ADDR,          0xC0     # + digit: where the data bytes go
+        .equ CMD_DISPLAY,       0x88     # display on + brightness 0..7
+
+        .data
+font:     .byte 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
+digits:   .byte 0, 0, 0, 0
+no_ack:   .asciz "No ACK from the TM1637: check its wiring and power.\\n"
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      s1, 1 << CLK_PIN
+        li      s2, 1 << DIO_PIN
+        or      t0, s1, s2
+        sw      t0, GPIO_OUT_W1TC(s0)   # an enabled line is LOW
+
+        # Input buffer + weak pull-up on DIO (to read the ACK), pull-up on CLK.
+        li      t0, IO_MUX_BASE + 4 + 4 * DIO_PIN
+        lw      t1, 0(t0)
+        ori     t1, t1, FUN_IE | FUN_WPU
+        sw      t1, 0(t0)
+        li      t0, IO_MUX_BASE + 4 + 4 * CLK_PIN
+        lw      t1, 0(t0)
+        ori     t1, t1, FUN_WPU
+        sw      t1, 0(t0)
+
+        call    tm_start                # turn the display on, check the ACK
+        li      a0, CMD_DISPLAY | 4
+        call    tm_byte
+        mv      s5, a0
+        call    tm_stop
+        beqz    s5, 1f
+        la      a0, no_ack
+        li      a7, 4                   # ecall: print string
+        ecall
+
+1:      li      s3, 0                   # seconds since the start
+        li      s4, 0                   # half second: 0 = colon on, 1 = off
+loop:
+        call    show_time
+        li      a0, 500
+        call    delay_ms
+        xori    s4, s4, 1
+        bnez    s4, loop
+        addi    s3, s3, 1               # a whole second has passed
+        li      t0, 6000                # 99:59 -> 00:00
+        bltu    s3, t0, loop
+        li      s3, 0
+        j       loop
+
+# ------------------------------------------------------------
+# show_time: write MM:SS (s3 seconds) to the 4 digits, with the
+# colon (bit 7 of digit 1) lit while s4 = 0.
+# ------------------------------------------------------------
+show_time:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s6, 8(sp)
+        li      t0, 60
+        divu    t1, s3, t0              # minutes
+        remu    t2, s3, t0              # seconds
+        li      t0, 10
+        la      t3, font
+        la      s6, digits
+        divu    t4, t1, t0              # tens of minutes
+        add     t4, t3, t4
+        lbu     t4, 0(t4)
+        sb      t4, 0(s6)
+        remu    t4, t1, t0              # minutes
+        add     t4, t3, t4
+        lbu     t4, 0(t4)
+        seqz    t5, s4
+        slli    t5, t5, 7               # colon
+        or      t4, t4, t5
+        sb      t4, 1(s6)
+        divu    t4, t2, t0              # tens of seconds
+        add     t4, t3, t4
+        lbu     t4, 0(t4)
+        sb      t4, 2(s6)
+        remu    t4, t2, t0              # seconds
+        add     t4, t3, t4
+        lbu     t4, 0(t4)
+        sb      t4, 3(s6)
+
+        call    tm_start
+        li      a0, CMD_DATA
+        call    tm_byte
+        call    tm_stop
+        call    tm_start
+        li      a0, CMD_ADDR            # digit 0, then 1, 2, 3
+        call    tm_byte
+        lbu     a0, 0(s6)
+        call    tm_byte
+        lbu     a0, 1(s6)
+        call    tm_byte
+        lbu     a0, 2(s6)
+        call    tm_byte
+        lbu     a0, 3(s6)
+        call    tm_byte
+        call    tm_stop
+
+        lw      s6, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# ------------------------------------------------------------
+# tm_start / tm_stop: start and stop conditions. Both lines are
+# HIGH between transfers; CLK is LOW after tm_start.
+# ------------------------------------------------------------
+tm_start:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s2, GPIO_ENABLE_W1TS(s0)    # DIO LOW while CLK is HIGH
+        call    tm_delay
+        sw      s1, GPIO_ENABLE_W1TS(s0)    # CLK LOW
+        call    tm_delay
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+tm_stop:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s2, GPIO_ENABLE_W1TS(s0)    # DIO LOW
+        call    tm_delay
+        sw      s1, GPIO_ENABLE_W1TC(s0)    # CLK HIGH
+        call    tm_delay
+        sw      s2, GPIO_ENABLE_W1TC(s0)    # DIO HIGH while CLK is HIGH
+        call    tm_delay
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# ------------------------------------------------------------
+# tm_byte(a0 = byte) -> a0 = 0 if the TM1637 acknowledged it.
+# Sends 8 bits LSB first, then clocks the ACK bit in.
+# ------------------------------------------------------------
+tm_byte:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s7, 8(sp)
+        sw      s8, 4(sp)
+        mv      s7, a0
+        li      s8, 8
+1:      andi    t0, s7, 1
+        beqz    t0, 2f
+        sw      s2, GPIO_ENABLE_W1TC(s0)    # bit 1: release DIO
+        j       3f
+2:      sw      s2, GPIO_ENABLE_W1TS(s0)    # bit 0: DIO LOW
+3:      call    tm_delay
+        sw      s1, GPIO_ENABLE_W1TC(s0)    # CLK HIGH: the chip reads DIO
+        call    tm_delay
+        sw      s1, GPIO_ENABLE_W1TS(s0)    # CLK LOW
+        srli    s7, s7, 1
+        addi    s8, s8, -1
+        bnez    s8, 1b
+
+        sw      s2, GPIO_ENABLE_W1TC(s0)    # release DIO: the chip pulls it LOW
+        call    tm_delay
+        sw      s1, GPIO_ENABLE_W1TC(s0)    # 9th clock
+        call    tm_delay
+        lw      s7, GPIO_IN(s0)
+        srli    s7, s7, DIO_PIN
+        andi    s7, s7, 1               # ACK = 0
+        sw      s1, GPIO_ENABLE_W1TS(s0)    # CLK LOW: the chip releases DIO
+        call    tm_delay
+        mv      a0, s7
+        lw      s8, 4(sp)
+        lw      s7, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# tm_delay: about 4 us at 160 MHz, so CLK stays well below the
+# TM1637's maximum clock rate. Clobbers t6.
+tm_delay:
+        li      t6, 320
+1:      addi    t6, t6, -1
+        bnez    t6, 1b
+        ret
+${DELAY_MS}`,
+      components: [
+        { id: 'tm1', type: 'tm1637', x: 300, y: 120, props: { points: 'colon', color: 'red', vcc: '3V3' }, conn: { CLK: 2, DIO: 3 } }
+      ]
+    },
+    {
+      id: 'lcd',
+      name: 'LCD1602, 4-bit parallel (7 wires)',
+      description: 'Drive a 16×2 character LCD over RS, RW, E and D4–D7: the 4-bit set-up, busy-flag polling, a custom character and a counter.',
+      code: `# ============================================================
+#  LCD1602 (HD44780 controller) in 4-bit mode, 7 wires:
+#  RS, RW, E and D4..D7. The controller latches a nibble on the
+#  falling edge of E. After power-up it is in 8-bit mode, so the
+#  4-bit set-up sends the nibble 3 three times, then 2; after
+#  that every byte is two nibbles, high first. Before each byte
+#  we read the busy flag (D7 with RS = 0, RW = 1) and wait until
+#  the controller has finished the previous one.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT_W1TS,     0x08
+        .equ GPIO_OUT_W1TC,     0x0C
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ GPIO_ENABLE_W1TC,  0x28
+        .equ GPIO_IN,           0x3C
+        .equ IO_MUX_BASE,       0x60009000
+        .equ MCU_SEL_MASK,      7 << 12  # IO MUX function select
+        .equ MCU_SEL_GPIO,      1 << 12  # function 1 = GPIOn
+        .equ FUN_IE,            1 << 9   # input enable
+        .equ SYSTIMER_BASE,     0x60023000
+        .equ RS,                1 << 0   # GPIO0
+        .equ RW,                1 << 1   # GPIO1
+        .equ E,                 1 << 2   # GPIO2
+        .equ DATA_SHIFT,        4        # D4..D7 on GPIO4..7
+        .equ DATA,              0xF << DATA_SHIFT
+        .equ BUSY,              1 << 7   # busy flag on D7 = GPIO7
+
+        .data
+line1:  .asciz "Hello, ESP32-C3!"
+line2:  .asciz "Count:"
+heart:  .byte 0x00, 0x0A, 0x1F, 0x1F, 0x0E, 0x04, 0x00, 0x00
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        # GPIO4..7 start in IO MUX function 0 (JTAG): select function 1
+        # (GPIOn) and turn the input buffer on to read the busy flag.
+        li      t0, IO_MUX_BASE + 4 + 4 * 4     # IO_MUX_GPIO4_REG
+        li      t1, IO_MUX_BASE + 4 + 4 * 8
+        li      t3, ~MCU_SEL_MASK
+        li      t4, MCU_SEL_GPIO | FUN_IE
+1:      lw      t2, 0(t0)
+        and     t2, t2, t3
+        or      t2, t2, t4
+        sw      t2, 0(t0)
+        addi    t0, t0, 4
+        bltu    t0, t1, 1b
+
+        li      t0, RS | RW | E | DATA
+        sw      t0, GPIO_OUT_W1TC(s0)   # all LOW
+        sw      t0, GPIO_ENABLE_W1TS(s0)
+
+        # 4-bit set-up. The busy flag can't be read yet: use delays.
+        li      a0, 50
+        call    delay_ms                # > 15 ms after power-up (40 ms at 3.3 V)
+        li      a0, 3
+        call    lcd_nibble
+        li      a0, 5
+        call    delay_ms                # > 4.1 ms
+        li      a0, 3
+        call    lcd_nibble
+        li      a0, 1
+        call    delay_ms                # > 100 us
+        li      a0, 3
+        call    lcd_nibble
+        li      a0, 1
+        call    delay_ms
+        li      a0, 2                   # function set: 4-bit interface
+        call    lcd_nibble
+
+        li      a0, 0x28                # function set: 4-bit, 2 lines, 5x8 dots
+        call    lcd_command
+        li      a0, 0x0C                # display on, cursor off, blink off
+        call    lcd_command
+        li      a0, 0x06                # entry mode: increment, no shift
+        call    lcd_command
+        li      a0, 0x01                # clear display
+        call    lcd_command
+
+        li      a0, 0x40                # CGRAM address 0: custom character 0
+        call    lcd_command
+        la      s1, heart
+        li      s2, 8                   # 8 pixel rows, bits 4..0
+2:      lbu     a0, 0(s1)
+        call    lcd_data
+        addi    s1, s1, 1
+        addi    s2, s2, -1
+        bnez    s2, 2b
+
+        li      a0, 0x80                # DDRAM address 0x00: line 1
+        call    lcd_command
+        la      a0, line1
+        call    lcd_print
+        li      a0, 0xC0                # DDRAM address 0x40: line 2
+        call    lcd_command
+        la      a0, line2
+        call    lcd_print
+        li      a0, 0xC0 + 15           # last column of line 2
+        call    lcd_command
+        li      a0, 0                   # custom character 0
+        call    lcd_data
+
+        li      s3, 0
+loop:
+        li      a0, 0xC0 + 7            # line 2, column 7
+        call    lcd_command
+        mv      a0, s3
+        call    lcd_number
+        li      a0, 100
+        call    delay_ms
+        addi    s3, s3, 1
+        j       loop
+
+# ------------------------------------------------------------
+# lcd_command(a0) / lcd_data(a0): send an instruction / a
+# character code, after waiting for the busy flag.
+# ------------------------------------------------------------
+lcd_command:
+        li      a1, 0
+        j       lcd_write
+lcd_data:
+        li      a1, 1
+lcd_write:                              # a0 = byte, a1 = RS
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s4, 8(sp)
+        sw      s5, 4(sp)
+        mv      s4, a0
+        mv      s5, a1
+        call    lcd_wait
+        li      t0, RS
+        beqz    s5, 1f
+        sw      t0, GPIO_OUT_W1TS(s0)   # RS = 1: character data
+        j       2f
+1:      sw      t0, GPIO_OUT_W1TC(s0)   # RS = 0: instruction
+2:      srli    a0, s4, 4
+        call    lcd_nibble              # high nibble
+        andi    a0, s4, 15
+        call    lcd_nibble              # low nibble
+        lw      s5, 4(sp)
+        lw      s4, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# lcd_nibble(a0 = 0..15): put it on D4..D7 and pulse E.
+lcd_nibble:
+        li      t0, DATA
+        sw      t0, GPIO_OUT_W1TC(s0)
+        slli    t0, a0, DATA_SHIFT
+        sw      t0, GPIO_OUT_W1TS(s0)
+        li      t1, E
+        sw      t1, GPIO_OUT_W1TS(s0)   # E HIGH
+        li      t2, 40                  # >= 450 ns
+1:      addi    t2, t2, -1
+        bnez    t2, 1b
+        sw      t1, GPIO_OUT_W1TC(s0)   # E LOW: the LCD takes the nibble
+        li      t2, 40
+2:      addi    t2, t2, -1
+        bnez    t2, 2b
+        ret
+
+# lcd_wait: read the busy flag until it is 0. D4..D7 become
+# inputs while RW = 1, because the LCD drives them.
+lcd_wait:
+        li      t0, DATA
+        sw      t0, GPIO_ENABLE_W1TC(s0)
+        li      t0, RS
+        sw      t0, GPIO_OUT_W1TC(s0)   # RS = 0: busy flag + address counter
+        li      t0, RW
+        sw      t0, GPIO_OUT_W1TS(s0)   # RW = 1: read
+        li      t1, E
+1:      sw      t1, GPIO_OUT_W1TS(s0)   # E HIGH: high nibble, D7 = busy flag
+        li      t2, 40
+2:      addi    t2, t2, -1
+        bnez    t2, 2b
+        lw      t3, GPIO_IN(s0)
+        sw      t1, GPIO_OUT_W1TC(s0)
+        li      t2, 40
+3:      addi    t2, t2, -1
+        bnez    t2, 3b
+        sw      t1, GPIO_OUT_W1TS(s0)   # second pulse: low nibble (not needed)
+        li      t2, 40
+4:      addi    t2, t2, -1
+        bnez    t2, 4b
+        sw      t1, GPIO_OUT_W1TC(s0)
+        li      t2, 40
+5:      addi    t2, t2, -1
+        bnez    t2, 5b
+        andi    t3, t3, BUSY
+        bnez    t3, 1b
+        sw      t0, GPIO_OUT_W1TC(s0)   # RW = 0
+        li      t0, DATA
+        sw      t0, GPIO_ENABLE_W1TS(s0)  # D4..D7 outputs again
+        ret
+
+# lcd_print(a0 = address of a zero-terminated string)
+lcd_print:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s1, 8(sp)
+        mv      s1, a0
+1:      lbu     a0, 0(s1)
+        beqz    a0, 2f
+        call    lcd_data
+        addi    s1, s1, 1
+        j       1b
+2:      lw      s1, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# lcd_number(a0): print a0 as 5 decimal digits
+lcd_number:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s1, 8(sp)
+        sw      s2, 4(sp)
+        mv      s1, a0
+        li      s2, 10000
+1:      divu    a0, s1, s2
+        remu    s1, s1, s2
+        addi    a0, a0, 48              # '0' + digit
+        call    lcd_data
+        li      t0, 10
+        divu    s2, s2, t0
+        bnez    s2, 1b
+        lw      s2, 4(sp)
+        lw      s1, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+${DELAY_MS}`,
+      components: [
+        { id: 'lcd1', type: 'lcd1602', x: 260, y: 40, props: { color: 'blue', vcc: '5V' }, conn: { RS: 0, RW: 1, E: 2, D4: 4, D5: 5, D6: 6, D7: 7 } }
+      ]
+    },
+    {
+      id: 'lcd-i2c',
+      name: 'LCD1602 over I2C (PCF8574)',
+      description: 'Bit-bang I2C (SDA, SCL with ACK) to an LCD1602 with a PCF8574 backpack at address 0x27 and show a seconds counter.',
+      code: `# ============================================================
+#  LCD1602 with an I2C backpack (PCF8574 at address 0x27).
+#  A byte written to the PCF8574 sets its 8 port pins:
+#  P0 = RS, P1 = RW, P2 = E, P3 = backlight, P4..P7 = D4..D7.
+#  One nibble reaches the LCD as two port writes, with E = 1
+#  and then E = 0 (the LCD latches on the falling edge).
+#  I2C is bit-banged open-drain on SDA = GPIO2, SCL = GPIO3:
+#  GPIO_OUT stays 0, enabling the output pulls a line LOW and
+#  disabling it lets the backpack's pull-up take it HIGH, so
+#  the PCF8574 can pull SDA LOW to acknowledge each byte.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT_W1TC,     0x0C
+        .equ GPIO_ENABLE_W1TS,  0x24     # pull LOW
+        .equ GPIO_ENABLE_W1TC,  0x28     # release (HIGH)
+        .equ GPIO_IN,           0x3C
+        .equ IO_MUX_BASE,       0x60009000
+        .equ FUN_WPU,           1 << 8   # weak pull-up
+        .equ FUN_IE,            1 << 9   # input enable
+        .equ SYSTIMER_BASE,     0x60023000
+        .equ SDA_PIN,           2
+        .equ SCL_PIN,           3
+        .equ LCD_ADDR,          0x27
+        .equ BL,                0x08     # P3: backlight on
+        .equ EN,                0x04     # P2: E
+
+        .data
+line1:  .asciz "LCD1602 over I2C"
+line2:  .asciz "Seconds:"
+no_ack: .asciz "No ACK at I2C address 0x27: check SDA, SCL and power.\\n"
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      s1, 1 << SCL_PIN
+        li      s2, 1 << SDA_PIN
+        or      t0, s1, s2
+        sw      t0, GPIO_OUT_W1TC(s0)   # an enabled line is LOW
+
+        li      t0, IO_MUX_BASE + 4 + 4 * SDA_PIN
+        lw      t1, 0(t0)
+        ori     t1, t1, FUN_IE | FUN_WPU    # read SDA for the ACK
+        sw      t1, 0(t0)
+        li      t0, IO_MUX_BASE + 4 + 4 * SCL_PIN
+        lw      t1, 0(t0)
+        ori     t1, t1, FUN_WPU
+        sw      t1, 0(t0)
+
+        li      a0, 50
+        call    delay_ms                # > 15 ms after power-up (40 ms at 3.3 V)
+        li      a0, BL                  # backlight on, E LOW
+        call    pcf_write
+        beqz    a0, 1f
+        la      a0, no_ack
+        li      a7, 4                   # ecall: print string
+        ecall
+
+        # 4-bit set-up: nibble 3 three times, then 2 (one E pulse each)
+1:      li      a0, 0x30
+        call    lcd_nibble
+        li      a0, 5
+        call    delay_ms                # > 4.1 ms
+        li      a0, 0x30
+        call    lcd_nibble
+        li      a0, 1
+        call    delay_ms                # > 100 us
+        li      a0, 0x30
+        call    lcd_nibble
+        li      a0, 1
+        call    delay_ms
+        li      a0, 0x20                # function set: 4-bit interface
+        call    lcd_nibble
+        li      a0, 1
+        call    delay_ms
+
+        li      a0, 0x28                # 4-bit, 2 lines, 5x8 dots
+        call    lcd_command
+        li      a0, 0x0C                # display on, cursor off
+        call    lcd_command
+        li      a0, 0x06                # entry mode: increment
+        call    lcd_command
+        li      a0, 0x01                # clear display: takes 1.52 ms
+        call    lcd_command
+        li      a0, 2
+        call    delay_ms
+
+        li      a0, 0x80                # line 1
+        call    lcd_command
+        la      a0, line1
+        call    lcd_print
+        li      a0, 0xC0                # line 2
+        call    lcd_command
+        la      a0, line2
+        call    lcd_print
+
+        li      s3, 0                   # seconds
+loop:
+        li      a0, 0xC0 + 9            # line 2, column 9
+        call    lcd_command
+        mv      a0, s3
+        call    lcd_number
+        li      a0, 1000
+        call    delay_ms
+        addi    s3, s3, 1
+        j       loop
+
+# ------------------------------------------------------------
+# lcd_command(a0) / lcd_data(a0): send a byte as two nibbles.
+# Each I2C transfer takes far longer than the 37 us the LCD
+# needs, so no busy-flag check is needed here.
+# ------------------------------------------------------------
+lcd_command:
+        li      a1, 0
+        j       lcd_write
+lcd_data:
+        li      a1, 1                   # P0 = RS
+lcd_write:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s4, 8(sp)
+        sw      s5, 4(sp)
+        mv      s4, a0
+        mv      s5, a1
+        andi    a0, s4, 0xF0
+        or      a0, a0, s5
+        call    lcd_nibble              # high nibble
+        slli    a0, s4, 4
+        andi    a0, a0, 0xF0
+        or      a0, a0, s5
+        call    lcd_nibble              # low nibble
+        lw      s5, 4(sp)
+        lw      s4, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# lcd_nibble(a0 = nibble << 4 | RS): one I2C transfer with two
+# port writes, E = 1 then E = 0.
+lcd_nibble:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s6, 8(sp)
+        ori     s6, a0, BL
+        call    i2c_start
+        li      a0, LCD_ADDR << 1       # address + write
+        call    i2c_byte
+        ori     a0, s6, EN
+        call    i2c_byte                # E HIGH
+        mv      a0, s6
+        call    i2c_byte                # E LOW: the LCD takes the nibble
+        call    i2c_stop
+        lw      s6, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# pcf_write(a0 = port byte) -> a0 = 0 if the PCF8574 answered.
+pcf_write:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s6, 8(sp)
+        sw      s7, 4(sp)
+        mv      s6, a0
+        call    i2c_start
+        li      a0, LCD_ADDR << 1
+        call    i2c_byte
+        mv      s7, a0                  # ACK of the address
+        mv      a0, s6
+        call    i2c_byte
+        call    i2c_stop
+        mv      a0, s7
+        lw      s7, 4(sp)
+        lw      s6, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# lcd_print(a0 = address of a zero-terminated string)
+lcd_print:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s9, 8(sp)               # (s1, s2 hold the SCL / SDA masks)
+        mv      s9, a0
+1:      lbu     a0, 0(s9)
+        beqz    a0, 2f
+        call    lcd_data
+        addi    s9, s9, 1
+        j       1b
+2:      lw      s9, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# lcd_number(a0): print a0 as 5 decimal digits
+lcd_number:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s9, 8(sp)
+        sw      s10, 4(sp)
+        mv      s9, a0
+        li      s10, 10000
+1:      divu    a0, s9, s10
+        remu    s9, s9, s10
+        addi    a0, a0, 48              # '0' + digit
+        call    lcd_data
+        li      t0, 10
+        divu    s10, s10, t0
+        bnez    s10, 1b
+        lw      s10, 4(sp)
+        lw      s9, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# ------------------------------------------------------------
+# I2C, about 100 kHz. SDA changes only while SCL is LOW, except
+# for start (SDA falls while SCL is HIGH) and stop (SDA rises).
+# ------------------------------------------------------------
+i2c_start:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s2, GPIO_ENABLE_W1TS(s0)    # SDA LOW while SCL is HIGH
+        call    i2c_delay
+        sw      s1, GPIO_ENABLE_W1TS(s0)    # SCL LOW
+        call    i2c_delay
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+i2c_stop:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s2, GPIO_ENABLE_W1TS(s0)    # SDA LOW
+        call    i2c_delay
+        sw      s1, GPIO_ENABLE_W1TC(s0)    # SCL HIGH
+        call    i2c_delay
+        sw      s2, GPIO_ENABLE_W1TC(s0)    # SDA HIGH while SCL is HIGH
+        call    i2c_delay
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# i2c_byte(a0 = byte) -> a0 = 0 if acknowledged. MSB first.
+i2c_byte:
+        addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s7, 8(sp)
+        sw      s8, 4(sp)
+        mv      s7, a0
+        li      s8, 8
+1:      andi    t0, s7, 0x80
+        beqz    t0, 2f
+        sw      s2, GPIO_ENABLE_W1TC(s0)    # bit 1: release SDA
+        j       3f
+2:      sw      s2, GPIO_ENABLE_W1TS(s0)    # bit 0: SDA LOW
+3:      call    i2c_delay
+        sw      s1, GPIO_ENABLE_W1TC(s0)    # SCL HIGH: the slave reads SDA
+        call    i2c_delay
+        sw      s1, GPIO_ENABLE_W1TS(s0)    # SCL LOW
+        slli    s7, s7, 1
+        addi    s8, s8, -1
+        bnez    s8, 1b
+
+        sw      s2, GPIO_ENABLE_W1TC(s0)    # release SDA for the ACK
+        call    i2c_delay
+        sw      s1, GPIO_ENABLE_W1TC(s0)    # 9th clock
+        call    i2c_delay
+        lw      s7, GPIO_IN(s0)
+        srli    s7, s7, SDA_PIN
+        andi    s7, s7, 1               # ACK = 0
+        sw      s1, GPIO_ENABLE_W1TS(s0)    # SCL LOW: the slave releases SDA
+        call    i2c_delay
+        mv      a0, s7
+        lw      s8, 4(sp)
+        lw      s7, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+
+# i2c_delay: about 5 us at 160 MHz (half a 100 kHz clock). Clobbers t6.
+i2c_delay:
+        li      t6, 400
+1:      addi    t6, t6, -1
+        bnez    t6, 1b
+        ret
+${DELAY_MS}`,
+      components: [
+        { id: 'lcd1', type: 'lcd1602i2c', x: 260, y: 60, props: { color: 'blue', addr: '27', vcc: '5V' }, conn: { SDA: 2, SCL: 3 } }
+      ]
+    },
+    {
       id: 'lab-chaser',
       board: 'labc3',
       jumpers: { LED: true, '7S': false, PB: true },

@@ -60,6 +60,11 @@
       // force = pins connected to a level (value) by a pressed button / a switch,
       // pullUp / pullDown = resistors on the board (e.g. the BOOT button's pull-up on GPIO9).
       this.ext = { force: 0, value: 0, pullUp: 0, pullDown: 0 };
+      // Pins a chip inside a part drives (devDrive) and their levels (devValue): an open-drain
+      // ACK (TM1637 DIO, I2C SDA) or an LCD answering a read on D4..D7. Set with
+      // setDeviceDrive(); it changes while the program runs.
+      this.devDrive = 0;
+      this.devValue = 0;
       this.tx = [];                 // bytes written to the serial port
       // Optional callback(levels) run whenever a pin level changes, at the instruction that
       // changed it: lets parts with a serial interface (MAX7219) see every clock edge.
@@ -274,14 +279,15 @@
     // connects the pin to GND / 3V3, then pull-up / pull-down resistors (internal or on the
     // board). A floating pin (none of these) is shown as low.
     levels() {
-      const en = this.drivenPins(), f = this.ext.force & ~en;
+      const en = this.drivenPins(), dev = this.devDrive, f = (this.ext.force | dev) & ~en;
       const up = (this.ext.pullUp | this.wpuMask | USB_PULLUP) & ~en & ~f;
-      return ((this.gpioOut & en) | this.uartTxMask | (this.ext.value & f) | up) & GPIO_MASK;
+      const value = (this.ext.value & ~dev) | (this.devValue & dev);
+      return ((this.gpioOut & en) | this.uartTxMask | (value & f) | up) & GPIO_MASK;
     }
 
     /** Pins that nothing drives or pulls (their level is undefined on real hardware). */
     floatingPins() {
-      return ~(this.drivenPins() | this.ext.force | this.ext.pullUp | this.ext.pullDown | this.wpuMask | this.wpdMask | USB_PULLUP) & GPIO_MASK;
+      return ~(this.drivenPins() | this.ext.force | this.devDrive | this.ext.pullUp | this.ext.pullDown | this.wpuMask | this.wpdMask | USB_PULLUP) & GPIO_MASK;
     }
 
     // GPIO_IN_REG: only pins with FUN_IE set are seen by the input buffer.
@@ -332,6 +338,16 @@
         force: (ext.force | 0) & GPIO_MASK, value: (ext.value | 0) & GPIO_MASK,
         pullUp: (ext.pullUp | 0) & GPIO_MASK, pullDown: (ext.pullDown | 0) & GPIO_MASK
       };
+      this.pinsChanged();
+    }
+
+    /** Pins driven by chips in the parts (mask) and their levels (value, default LOW); see devDrive. */
+    setDeviceDrive(mask, value = 0) {
+      mask &= GPIO_MASK;
+      value &= mask;
+      if (mask === this.devDrive && value === this.devValue) return;
+      this.devDrive = mask;
+      this.devValue = value;
       this.pinsChanged();
     }
 

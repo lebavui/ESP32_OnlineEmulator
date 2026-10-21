@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  const { RVAsm, ESP32C3, PARTS, EXAMPLES, BLANK, BOARDS, DEFAULT_BOARD, Firmware, Flasher, MAX7219Chain } = window;
+  const { RVAsm, ESP32C3, PARTS, EXAMPLES, BLANK, BOARDS, DEFAULT_BOARD, Firmware, Flasher, MAX7219Chain, TM1637, HD44780, LCDI2C } = window;
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -22,7 +22,7 @@
 
   const machine = new ESP32C3();
   let comps = [];
-  const devices = new Map();   // part id -> chip model (MAX7219Chain) of parts with a serial interface
+  const devices = new Map();   // part id -> chip model (MAX7219Chain, TM1637, HD44780, LCDI2C) of parts with a serial interface
   let breakpointLines = new Set();
   let program = null;          // last successfully assembled program
   let loadedSource = null;     // source text currently loaded in the machine
@@ -32,6 +32,7 @@
   let pending = null;          // wire being drawn: {kind:'comp', id, pin} | {kind:'board', gpio} | {kind:'board', key}
   let autoPower = true;        // parts' GND / 3V3 pins are connected automatically
   let wireStyle = 'curve';     // 'curve' | 'ortho' (horizontal / vertical segments with user-placed corners)
+  let showLabels = true;       // part names (led1, seg1, …) under the parts
   let bootPressed = false;
   let labPressed = [];         // on-board push buttons of BOARD.lab, by index
   let jumpers = {};            // BOARD.lab jumper id -> installed
@@ -297,6 +298,7 @@
     loadedSource = ta.value;
     ioWarned = 0;
     outWarned = 0;
+    lcdWarned.clear();
     hwStopMonitor();
     applyInputs();
     clearSerial();
@@ -425,7 +427,7 @@
     $('#btnRun').disabled = running;
     $('#btnPause').disabled = !running;
     $('#btnStop').disabled = simState === 'stopped';
-    $('#btnRun').innerHTML = simState === 'paused' ? '▶ Resume' : '▶ Run';
+    $('#btnRun').title = simState === 'paused' ? 'Resume (F5)' : 'Run (F5)';
     document.body.dataset.sim = simState;
     if (simActive() && selection) select(null); // no part settings while simulating
     updateModified();
@@ -480,25 +482,75 @@
 
   // ================================================================ inputs (buttons / switches)
 
-  // Chip models of parts that read a serial stream (MAX7219 matrices). The machine calls
-  // onPinsChanged at the instruction that changes a pin, so bit-banged clock edges are never
-  // missed. Power-up state: an unpowered part is reset, and resetting the simulation resets them.
+  // Chip models of parts that read a serial stream (MAX7219 matrices, TM1637 displays, LCD1602
+  // in 4-bit or I2C mode). The machine calls onPinsChanged at the instruction that changes a
+  // pin, so bit-banged clock edges are never missed. Chips that drive pins (the TM1637 and
+  // I2C ACK, an LCD answering a read) pass that to the machine right away as a device drive,
+  // so the program sees it at its next instruction.
+  // Power-up state: an unpowered part is reset, and resetting the simulation resets them.
+  const DEVICE_CLASS = { matrix: MAX7219Chain, tm1637: TM1637, lcd1602: HD44780, lcd1602i2c: LCDI2C };
+  const CYCLES_PER_US = ESP32C3.CPU_HZ / 1e6;
+  const unwired = g => g === undefined || g === null;
   function syncDevices() {
-    const lv = machine.levels(), feeds = [];
-    for (const id of [...devices.keys()]) if (!comps.some(c => c.id === id && c.type === 'matrix')) devices.delete(id);
+    const lv = machine.levels(), feeds = [], drives = [];
+    const bit = (l, g) => unwired(g) ? 0 : (l >>> g) & 1;
+    for (const id of [...devices.keys()]) if (!comps.some(c => c.id === id && DEVICE_CLASS[c.type])) devices.delete(id);
     for (const c of comps) {
-      if (c.type !== 'matrix') continue;
-      const n = +c.props.modules || 1;
+      if (!DEVICE_CLASS[c.type]) continue;
       let d = devices.get(c.id);
-      if (!d || d.chips.length !== n) { d = new MAX7219Chain(n); devices.set(c.id, d); }
-      if (!isPowered(c)) { d.reset(); continue; }
-      const { DIN, CS, CLK } = c.conn;
-      if ([DIN, CS, CLK].some(g => g === undefined || g === null)) continue;
-      d.clk = (lv >>> CLK) & 1;                       // edges count from the current levels on
-      d.cs = (lv >>> CS) & 1;
-      feeds.push(l => d.input((l >>> DIN) & 1, (l >>> CS) & 1, (l >>> CLK) & 1));
+      if (d && !(d instanceof DEVICE_CLASS[c.type])) d = null;   // the id now belongs to another kind of part
+      if (c.type === 'matrix') {
+        const n = +c.props.modules || 1;
+        if (!d || d.chips.length !== n) { d = new MAX7219Chain(n); devices.set(c.id, d); }
+        if (!isPowered(c)) { d.reset(); continue; }
+        const { DIN, CS, CLK } = c.conn;
+        if ([DIN, CS, CLK].some(unwired)) continue;
+        d.clk = (lv >>> CLK) & 1;                       // edges count from the current levels on
+        d.cs = (lv >>> CS) & 1;
+        feeds.push(l => d.input((l >>> DIN) & 1, (l >>> CS) & 1, (l >>> CLK) & 1));
+      } else if (c.type === 'tm1637') {
+        if (!d) { d = new TM1637(); devices.set(c.id, d); }
+        if (!isPowered(c)) { d.reset(); continue; }
+        const { CLK, DIO } = c.conn;
+        if (unwired(CLK) || unwired(DIO)) { d.ack = false; continue; }
+        d.clk = (lv >>> CLK) & 1;
+        d.dio = (lv >>> DIO) & 1;
+        feeds.push(l => d.input((l >>> CLK) & 1, (l >>> DIO) & 1));
+        drives.push(() => [d.ack ? 1 << DIO : 0, 0]);
+      } else if (c.type === 'lcd1602') {
+        if (!d) { d = new HD44780(CYCLES_PER_US); devices.set(c.id, d); }
+        if (!isPowered(c)) { d.reset(); continue; }
+        const { RS, RW, E } = c.conn, D = ['D4', 'D5', 'D6', 'D7'].map(p => c.conn[p]);
+        if (unwired(RS) || unwired(E)) continue;       // an unwired RW counts as tied to GND
+        d.e = (lv >>> E) & 1;
+        feeds.push(l => d.input(bit(l, RS), bit(l, RW), bit(l, E), D.reduce((n, g, i) => n | bit(l, g) << i, 0), machine.core.cycle));
+        drives.push(() => {
+          const n = d.output();
+          let m = 0, v = 0;
+          if (n !== null) D.forEach((g, i) => { if (!unwired(g)) { m |= 1 << g; if ((n >> i) & 1) v |= 1 << g; } });
+          return [m, v];
+        });
+      } else if (c.type === 'lcd1602i2c') {
+        if (!d) { d = new LCDI2C(0x27, CYCLES_PER_US); devices.set(c.id, d); }
+        d.addr = parseInt(c.props.addr, 16) || 0x27;
+        if (!isPowered(c)) { d.reset(); continue; }
+        const { SDA, SCL } = c.conn;
+        if (unwired(SDA) || unwired(SCL)) { d.sink = false; continue; }
+        d.scl = (lv >>> SCL) & 1;
+        d.sda = (lv >>> SDA) & 1;
+        feeds.push(l => d.input((l >>> SCL) & 1, (l >>> SDA) & 1, machine.core.cycle));
+        drives.push(() => [d.sink ? 1 << SDA : 0, 0]);
+      }
     }
-    machine.onPinsChanged = feeds.length ? l => { for (const f of feeds) f(l); } : null;
+    const drive = () => {
+      let m = 0, v = 0;
+      for (const f of drives) { const [dm, dv] = f(); m |= dm; v |= dv; }
+      machine.setDeviceDrive(m, v);
+    };
+    machine.onPinsChanged = !feeds.length ? null : drives.length
+      ? l => { for (const f of feeds) f(l); drive(); }
+      : l => { for (const f of feeds) f(l); };
+    drive();
   }
 
   function resetDevices() {
@@ -509,11 +561,15 @@
   // Buttons and switches only connect a pin to GND or 3V3. A released button leaves its pin
   // floating, so the program needs a pull-up / pull-down (FUN_WPU / FUN_WPD in IO_MUX).
   function applyInputs() {
-    let force = 0, value = 0;
+    let force = 0, value = 0, pullUp = boardPullUp();
     const set = (g, v) => { if (!((force >>> g) & 1)) { force |= 1 << g; if (v) value |= 1 << g; } };
     if (bootPressed) set(9, 0);
     if (BOARD.lab) BOARD.lab.buttons.forEach((b, i) => { if (labPressed[i]) set(b.gpio, 0); });
     for (const c of comps) {
+      const pulled = { tm1637: ['CLK', 'DIO'], lcd1602i2c: ['SDA', 'SCL'] }[c.type];
+      if (pulled && isPowered(c)) {               // the module's pull-ups (TM1637 10k, I2C backpack 4.7k)
+        for (const p of pulled) if (!unwired(c.conn[p])) pullUp |= 1 << c.conn[p];
+      }
       const g = c.conn['1'];
       if (g === undefined || g === null) continue;
       if (c.type === 'button') {
@@ -523,7 +579,7 @@
         if (v !== null) set(g, v);
       }
     }
-    machine.setExternal({ force, value, pullUp: boardPullUp() });  // pull-ups on the board (BOOT button, …)
+    machine.setExternal({ force, value, pullUp });  // pull-ups on the board (BOOT button, …) and modules
     if (simState !== 'running') updateAll(true);
   }
 
@@ -548,6 +604,7 @@
   }
   function checkInputWarnings() {
     checkOutputWarnings();
+    checkLcdWarnings();
     const pins = inputPartPins();
     const ieOff = machine.ieOffReads & pins & ~ioWarned;
     const floating = machine.floatReads & pins & ~ioWarned & ~ieOff;
@@ -561,6 +618,19 @@
     }
     toast(`GPIO${list(ieOff | floating).join(', GPIO')}: input not set up correctly, see Messages`, 'error');
     ioWarned |= ieOff | floating;
+  }
+
+  // Warn (once per run and LCD) when a byte reached an LCD while its controller was busy:
+  // the controller ignores it, so the program must wait (busy flag or a delay) between bytes.
+  const lcdWarned = new Set();
+  function checkLcdWarnings() {
+    for (const c of comps) {
+      const d = devices.get(c.id), lcd = d && (c.type === 'lcd1602' ? d : c.type === 'lcd1602i2c' ? d.lcd : null);
+      if (!lcd || !lcd.lost || lcdWarned.has(c.id)) continue;
+      lcdWarned.add(c.id);
+      addMessage('warn', `${c.id}: a byte reached the LCD while its controller was busy and was ignored. Wait 15 ms after power-up, 1.52 ms after clear / home and 37 µs after other bytes (or poll the busy flag) before sending the next one.`);
+      toast(`${c.id}: LCD byte lost (controller busy), see Messages`, 'error');
+    }
   }
 
   // Warn (once per run and pin) when the program writes GPIO_OUT for an output pin whose
@@ -1318,7 +1388,7 @@
   // on screen (not hidden under the settings panel); otherwise the first free slot.
   function findFreeSpot(def) {
     const r = svg.getBoundingClientRect();
-    const visRight = r.width - 300; // keep clear of the inspector panel
+    const visRight = r.width - 330; // keep clear of the inspector panel and the zoom buttons
     const overlaps = (x, y) => comps.some(c => {
       const d = partSize(c);
       return x < c.x + d.w + 30 && x + def.w + 30 > c.x && y < c.y + d.h + 40 && y + def.h + 40 > c.y;
@@ -1343,7 +1413,7 @@
   function addPart(type) {
     const def = PARTS[type];
     let n = 1;
-    const prefix = { led: 'led', button: 'btn', switch: 'sw', sevenseg: 'seg', matrix: 'mx' }[type];
+    const prefix = { led: 'led', rgbled: 'rgb', button: 'btn', switch: 'sw', sevenseg: 'seg', matrix: 'mx', tm1637: 'tm', lcd1602: 'lcd', lcd1602i2c: 'lcd' }[type];
     while (compById(prefix + n)) n++;
     const spot = findFreeSpot(def);
     const c = {
@@ -1356,7 +1426,22 @@
     toast(`Added ${def.title}. Click one of its pins, then a GPIO pin on the board.`);
   }
 
-  $$('[data-add]').forEach(b => b.addEventListener('click', () => addPart(b.dataset.add)));
+  // Add-part dialog (top bar)
+  $$('[data-add]').forEach(b => b.addEventListener('click', () => {
+    $('#partsDlg').close();
+    addPart(b.dataset.add);
+  }));
+  $('#btnAddPart').addEventListener('click', () => { cancelPending(); $('#partsDlg').showModal(); });
+
+  $('#btnClearParts').addEventListener('click', () => {
+    if (!comps.length) { toast('There are no parts on the breadboard.'); return; }
+    if (!confirm(`Remove all ${comps.length} part${comps.length > 1 ? 's' : ''} from the breadboard?`)) return;
+    comps = [];
+    selection = null;
+    cancelPending();
+    afterPartsChanged();
+    toast('Removed all parts');
+  });
   $('#zoomIn').addEventListener('click', () => { const r = svg.getBoundingClientRect(); zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1.2); });
   $('#zoomOut').addEventListener('click', () => { const r = svg.getBoundingClientRect(); zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1 / 1.2); });
   $('#zoomFit').addEventListener('click', fitView);
@@ -1444,8 +1529,14 @@
     startPending({ kind: 'board', gpio }, `Wiring GPIO${gpio}: click a pin on a part`);
   }
 
-  // ---- settings dialog: power supply (auto / manual) and wire style; both are project settings
+  // ---- settings dialog: power supply (auto / manual), wire style and part names; all are project settings
   const settingsForm = $('#settingsForm');
+
+  function setShowLabels(on) {
+    showLabels = on;
+    settingsForm.elements.labels.value = on ? 'show' : 'hide';
+    svg.classList.toggle('hide-labels', !on);
+  }
 
   function setWireStyle(style) {
     wireStyle = style === 'ortho' ? 'ortho' : 'curve';
@@ -1473,7 +1564,10 @@
   });
 
   settingsForm.addEventListener('change', e => {
-    if (e.target.name === 'wires') {
+    if (e.target.name === 'labels') {
+      setShowLabels(e.target.value === 'show');
+      scheduleSave();
+    } else if (e.target.name === 'wires') {
       setWireStyle(e.target.value);
       renderWires();
       renderInspector();
@@ -2279,6 +2373,7 @@ Serial port: ${portLabel(port)}` : '');
       code: ta.value,
       autoPower,
       wireStyle,
+      showLabels,
       components: comps.map(c => ({ id: c.id, type: c.type, x: c.x, y: c.y, props: c.props, conn: c.conn, route: c.route })),
       breakpoints: [...breakpointLines]
     };
@@ -2289,6 +2384,7 @@ Serial port: ${portLabel(port)}` : '');
     ta.value = p.code || '';
     setAutoPower(p.autoPower !== false);
     setWireStyle(p.wireStyle);
+    setShowLabels(p.showLabels === undefined ? showLabels : p.showLabels !== false);  // examples keep the current choice
     setBoard(p.board, p.jumpers);
     comps = normalizeComps(p.components);
     breakpointLines = new Set((p.breakpoints || []).filter(n => Number.isInteger(n)));

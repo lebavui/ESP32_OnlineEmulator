@@ -410,6 +410,162 @@ const CPU_HZ = ESP32C3.CPU_HZ;
     heart + ' | ' + smiley);
 }
 
+// ---- TM1637: two-wire protocol with ACK, commands, and the clock example end to end
+{
+  const { TM1637 } = require('../js/tm1637.js');
+  const tm = new TM1637();
+  let acks = '';
+  const xfer = bytes => {               // start, bytes LSB first with an ACK clock each, stop
+    tm.input(1, 1); tm.input(1, 0); tm.input(0, 0);
+    for (const b of bytes) {
+      for (let i = 0; i < 8; i++) { const d = (b >> i) & 1; tm.input(0, d); tm.input(1, d); tm.input(0, d); }
+      acks += tm.ack ? 'A' : '-';
+      tm.input(1, 0); tm.input(0, 0);
+      acks += tm.ack ? 'A' : '-';
+    }
+    tm.input(0, 0); tm.input(1, 0); tm.input(1, 1);
+  };
+  xfer([0x40]); xfer([0xC0, 0x3F, 0x86, 0x5B, 0x4F]);
+  check('TM1637 acknowledges each byte for one clock', acks === 'A-'.repeat(6), acks);
+  check('TM1637 display stays off until the display control command', [...tm.segments()].every(v => v === 0) && tm.regs[1] === 0x86);
+  xfer([0x8B]);
+  check('TM1637 display on, brightness 3 = 10/16', tm.segments().slice(0, 4).join() === '63,134,91,79' && tm.brightness() === 10 / 16);
+  xfer([0x44]); xfer([0xC2, 0x06, 0x07]);
+  check('TM1637 fixed address mode', tm.regs[2] === 0x07 && tm.regs[3] === 0x4F, [...tm.regs].join());
+  xfer([0x80]);
+  check('TM1637 display off blanks the digits', tm.brightness() === 0 && [...tm.segments()].every(v => v === 0));
+
+  // Clock example, with the module's pull-ups and the chip's ACK on DIO (GPIO3) as in app.js.
+  const run = attach => {
+    const m = exampleMachine('tm1637');
+    m.setExternal({ pullUp: (1 << 2) | (1 << 3) });
+    const chip = new TM1637();
+    chip.clk = 1; chip.dio = 1;           // both lines idle HIGH (pulled up)
+    if (attach) m.onPinsChanged = l => { chip.input((l >>> 2) & 1, (l >>> 3) & 1); m.setDeviceDrive(chip.ack ? 1 << 3 : 0); };
+    return { m, chip };
+  };
+  const { m, chip } = run(true);
+  m.run(CPU_HZ * 2.2, null, Infinity);
+  const t1 = chip.segments().slice(0, 4).join();
+  m.run(CPU_HZ * 2.6, null, Infinity);
+  const t2 = chip.segments().slice(0, 4).join();
+  check('tm1637 example shows 00:02 with a blinking colon', t1 === '63,191,63,91' && t2 === '63,63,63,91' && chip.brightness() === 11 / 16 && m.tx.length === 0,
+    t1 + ' | ' + t2 + ' | ' + Buffer.from(m.tx).toString());
+  const alone = run(false).m;
+  alone.run(CPU_HZ * 0.01, null, Infinity);
+  check('tm1637 example reports a missing ACK', Buffer.from(alone.tx).toString().startsWith('No ACK'), Buffer.from(alone.tx).toString());
+}
+
+{ // RGB colour wheel: in the first third red fades into green (R + G = full), blue stays off
+  const m = exampleMachine('rgb');
+  m.run(CPU_HZ * 0.4, null, Infinity);
+  m.sampleDuty();
+  m.run(CPU_HZ * 0.45, null, Infinity);
+  const d = m.sampleDuty(), r = d[2], g = d[3], b = d[10];
+  check('rgb example mixes red and green by PWM', Math.abs(r + g - 1) < 0.03 && g > 0.2 && r > 0.2 && b === 0, [r, g, b].map(v => v.toFixed(3)).join());
+}
+
+// ---- LCD1602: HD44780 in 4-bit mode, the PCF8574 I2C backpack, and both examples end to end
+{
+  const { HD44780, LCDI2C } = require('../js/lcd1602.js');
+  const US = 160;                        // CPU cycles per microsecond
+  const text = (lcd, r) => String.fromCharCode(...lcd.screen().rows[r]);
+  let t = 20000 * US;                    // after the 15 ms power-up busy time
+  const lcd = new HD44780(US);
+  const pulse = (rs, d, us = 2000) => { lcd.input(rs, 0, 0, d, t); lcd.input(rs, 0, 1, d, t); lcd.input(rs, 0, 0, d, t); t += us * US; };
+  const byte = (rs, b, us) => { pulse(rs, b >> 4, us); pulse(rs, b & 15, us); };
+  lcd.input(0, 0, 0, 0, t);
+  pulse(0, 3); pulse(0, 3); pulse(0, 3); pulse(0, 2);
+  [0x28, 0x0C, 0x06, 0x01].forEach(b => byte(0, b));
+  for (const ch of 'Hi') byte(1, ch.charCodeAt(0));
+  byte(0, 0xC0); byte(1, 0x41);
+  check('HD44780 4-bit set-up and text on both lines', text(lcd, 0).startsWith('Hi  ') && text(lcd, 1).startsWith('A ') && lcd.lost === 0 && lcd.on && lcd.lines2,
+    JSON.stringify([text(lcd, 0), text(lcd, 1), lcd.lost]));
+  // Busy flag: right after a clear the controller is busy for 1.52 ms and ignores bytes.
+  const read = rs => { let v = 0; for (const sh of [4, 0]) { lcd.input(rs, 1, 1, 0, t); v |= lcd.output() << sh; lcd.input(rs, 1, 0, 0, t); } return v; };
+  byte(0, 0x01, 0);
+  const bf = read(0);
+  byte(1, 0x42, 0);
+  t += 2000 * US;
+  check('HD44780 busy flag after clear, byte lost while busy', (bf & 0x80) && (read(0) & 0x80) === 0 && lcd.lost === 1 && text(lcd, 0).trim() === '', [bf, lcd.lost]);
+  byte(0, 0x40); [0x0A, 0x1F].forEach(b => byte(1, b)); byte(0, 0x80); byte(1, 0);
+  check('HD44780 CGRAM custom character', lcd.glyph(lcd.screen().rows[0][0]).slice(0, 2).join() === '10,31');
+  byte(0, 0x80); const r = read(1);
+  t += 100 * US;
+  check('HD44780 data read returns DDRAM and advances', r === 0 && read(0) === 0x01, [r]);
+
+  // PCF8574 backpack: address match / NACK, port writes, port read with ACK on SDA
+  const bp = new LCDI2C(0x27, US);
+  let acks = '';
+  const level = (scl, sda) => bp.input(scl, bp.sink ? 0 : sda, t);
+  const i2c = (bytes, readN = 0) => {
+    level(1, 1); level(1, 0); level(0, 0);
+    for (const b of bytes) {
+      for (let i = 7; i >= 0; i--) { const d = (b >> i) & 1; level(0, d); level(1, d); level(0, d); }
+      level(0, 1); level(1, 1); acks += bp.sink ? 'A' : 'N'; level(0, 1);
+    }
+    const got = [];
+    for (let k = 0; k < readN; k++) {
+      let v = 0;
+      for (let i = 7; i >= 0; i--) { level(1, 1); v |= (bp.sink ? 0 : 1) << i; level(0, 1); }
+      const last = k === readN - 1;
+      level(0, last ? 1 : 0); level(1, last ? 1 : 0); level(0, last ? 1 : 0);
+      got.push(v);
+    }
+    level(0, 0); level(1, 0); level(1, 1);
+    return got;
+  };
+  i2c([0x3F << 1]);
+  i2c([0x27 << 1, 0x08, 0x52]);
+  const got = i2c([0x27 << 1 | 1], 2);
+  check('PCF8574: wrong address NACKed, writes ACKed and set the port', acks === 'NAAAA' && bp.port === 0x52 && !bp.backlight, acks);
+  check('PCF8574: read returns the port', got.join() === '82,82', got.join());
+  t += 100 * US;
+  i2c([0x27 << 1, 0xF2, 0xF6]);           // RW = 1, then E = 1: the LCD drives D7..D4 (busy flag 0, address 0)
+  const bfRead = i2c([0x27 << 1 | 1], 1);
+  check('PCF8574: read sees the LCD pulling D4..D7 low', bfRead.join() === '6', bfRead.join());
+
+  const lcdMachine = (id, attach) => {
+    const m = exampleMachine(id);
+    const ex = EXAMPLES.find(e => e.id === id), conn = ex.components[0].conn;
+    const bit = (l, g) => g === undefined ? 0 : (l >>> g) & 1;
+    if (ex.components[0].type === 'lcd1602') {
+      const dev = new HD44780(US), D = [conn.D4, conn.D5, conn.D6, conn.D7];
+      dev.e = 0;
+      m.onPinsChanged = l => {
+        dev.input(bit(l, conn.RS), bit(l, conn.RW), bit(l, conn.E), D.reduce((n, g, i) => n | bit(l, g) << i, 0), m.core.cycle);
+        const n = dev.output();
+        let mask = 0, v = 0;
+        if (n !== null) D.forEach((g, i) => { mask |= 1 << g; if ((n >> i) & 1) v |= 1 << g; });
+        m.setDeviceDrive(mask, v);
+      };
+      return { m, lcd: dev };
+    }
+    const dev = new LCDI2C(0x27, US);
+    m.setExternal({ pullUp: (1 << conn.SDA) | (1 << conn.SCL) });
+    dev.scl = 1; dev.sda = 1;
+    if (attach) m.onPinsChanged = l => { dev.input(bit(l, conn.SCL), bit(l, conn.SDA), m.core.cycle); m.setDeviceDrive(dev.sink ? 1 << conn.SDA : 0); };
+    return { m, lcd: dev.lcd, dev };
+  };
+  {
+    const { m, lcd: l } = lcdMachine('lcd', true);
+    m.run(CPU_HZ * 0.35, null, Infinity);
+    check('lcd example: text, custom heart and counter, nothing lost',
+      text(l, 0) === 'Hello, ESP32-C3!' && text(l, 1).startsWith('Count: 0000') && l.screen().rows[1][15] === 0 && l.lost === 0,
+      JSON.stringify([text(l, 0), text(l, 1), l.lost]));
+  }
+  {
+    const { m, lcd: l, dev } = lcdMachine('lcd-i2c', true);
+    m.run(CPU_HZ * 1.2, null, Infinity);
+    check('lcd-i2c example: text and seconds, backlight on, nothing lost',
+      text(l, 0) === 'LCD1602 over I2C' && text(l, 1) === 'Seconds: 00001  ' && dev.backlight && l.lost === 0 && m.tx.length === 0,
+      JSON.stringify([text(l, 0), text(l, 1), l.lost, Buffer.from(m.tx).toString()]));
+    const alone = lcdMachine('lcd-i2c', false).m;
+    alone.run(CPU_HZ * 0.06, null, Infinity);
+    check('lcd-i2c example reports a missing ACK', Buffer.from(alone.tx).toString().startsWith('No ACK'), Buffer.from(alone.tx).toString());
+  }
+}
+
 // ---- boards: every header GPIO is listed once, and the wireable GPIOs are exactly those
 {
   const { BOARDS } = require('../js/boards.js');
