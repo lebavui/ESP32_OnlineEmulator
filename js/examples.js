@@ -83,6 +83,90 @@ new_presses:
         ret
 `;
 
+  // 7-segment counter for a common-cathode display whose segments a, b, ..., g, dp are on
+  // the GPIOs in pins (one per segment); the code looks the pins up in a table.
+  const SEVENSEG = pins => `# ============================================================
+#  7-segment counter: shows 0..9, one digit per second.
+#  Segments a,b,c,d,e,f,g,dp are wired to GPIO${pins.join(',')}
+#  (common cathode: a high pin lights the segment).
+#  To use other pins, change the segpins table.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT,          0x04
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ SYSTIMER_BASE,     0x60023000
+${MCU_SEL_EQU}
+        .data
+segpins:                        # GPIO of segment a, b, c, d, e, f, g, dp
+        .byte   ${pins.join(', ')}
+digits:                         # bit0 = a ... bit6 = g
+        .byte   0x3F, 0x06, 0x5B, 0x4F, 0x66
+        .byte   0x6D, 0x7D, 0x07, 0x7F, 0x6F
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        # For each segment pin: select IO MUX function 1 (GPIOn; GPIO4..7
+        # and GPIO20/21 start as JTAG / UART pins) and collect its bit in s1.
+        la      t0, segpins
+        li      t1, 8
+        li      s1, 0                       # mask of all segment pins
+1:      lbu     t2, 0(t0)
+        li      t3, 1
+        sll     t3, t3, t2
+        or      s1, s1, t3
+        slli    t2, t2, 2
+        li      t3, IO_MUX_BASE + 4
+        add     t3, t3, t2                  # IO_MUX_GPIOn_REG
+        lw      t4, 0(t3)
+        li      t5, ~MCU_SEL_MASK
+        and     t4, t4, t5
+        li      t5, MCU_SEL_GPIO
+        or      t4, t4, t5
+        sw      t4, 0(t3)
+        addi    t0, t0, 1
+        addi    t1, t1, -1
+        bnez    t1, 1b
+        sw      s1, GPIO_ENABLE_W1TS(s0)    # segment pins = outputs
+        li      s2, 0                       # counter
+
+loop:
+        la      t0, digits
+        add     t0, t0, s2
+        lbu     a0, 0(t0)                   # segment pattern of the digit
+        call    show
+        li      a0, 1000
+        call    delay_ms
+        addi    s2, s2, 1                   # next digit
+        li      t0, 10
+        blt     s2, t0, loop
+        li      s2, 0
+        j       loop
+
+# show(a0 = pattern, bit0 = a ... bit7 = dp): bit n lights the
+# segment on GPIO segpins[n]. Other pins keep their state.
+show:
+        la      t0, segpins
+        li      t1, 0                       # pins to drive HIGH
+        li      t2, 8
+1:      andi    t3, a0, 1
+        beqz    t3, 2f
+        lbu     t4, 0(t0)
+        li      t3, 1
+        sll     t3, t3, t4
+        or      t1, t1, t3
+2:      srli    a0, a0, 1
+        addi    t0, t0, 1
+        addi    t2, t2, -1
+        bnez    t2, 1b
+        lw      t2, GPIO_OUT(s0)            # read-modify-write
+        not     t3, s1
+        and     t2, t2, t3
+        or      t2, t2, t1
+        sw      t2, GPIO_OUT(s0)
+        ret
+${DELAY_MS}`;
+
   const EXAMPLES = [
     {
       id: 'blink',
@@ -169,48 +253,8 @@ pressed:
     {
       id: 'sevenseg',
       name: '7-segment counter',
-      description: 'Count 0-9 on a common-cathode 7-segment display wired to GPIO0..GPIO7.',
-      code: `# ============================================================
-#  7-segment counter: shows 0..9, one digit per second.
-#  Segments a,b,c,d,e,f,g,dp are wired to GPIO0..GPIO7
-#  (common cathode: a high pin lights the segment).
-# ============================================================
-        .equ GPIO_BASE,         0x60004000
-        .equ GPIO_OUT,          0x04
-        .equ GPIO_ENABLE_W1TS,  0x24
-        .equ SYSTIMER_BASE,     0x60023000
-${MCU_SEL_EQU}        .equ SEG_MASK,          0xFF
-
-        .data
-digits:                         # bit0 = a ... bit6 = g
-        .byte   0x3F, 0x06, 0x5B, 0x4F, 0x66
-        .byte   0x6D, 0x7D, 0x07, 0x7F, 0x6F
-
-        .text
-main:
-        li      s0, GPIO_BASE
-        li      t0, SEG_MASK
-        sw      t0, GPIO_ENABLE_W1TS(s0)    # GPIO0..7 = outputs
-${GPIO_FUNC(4, 7)}        la      s1, digits
-        li      s2, 0                       # counter
-
-loop:
-        add     t0, s1, s2
-        lbu     t1, 0(t0)                   # segment pattern of the digit
-        lw      t2, GPIO_OUT(s0)            # read-modify-write so that
-        andi    t2, t2, ~SEG_MASK           # other pins keep their state
-        or      t2, t2, t1
-        sw      t2, GPIO_OUT(s0)
-
-        li      a0, 1000
-        call    delay_ms
-
-        addi    s2, s2, 1                   # next digit
-        li      t0, 10
-        blt     s2, t0, loop
-        li      s2, 0
-        j       loop
-${DELAY_MS}`,
+      description: 'Count 0-9 on a common-cathode 7-segment display wired to GPIO0..GPIO7 (a..g, dp).',
+      code: SEVENSEG([0, 1, 2, 3, 4, 5, 6, 7]),
       components: [
         {
           id: 'seg1', type: 'sevenseg', x: 300, y: 120, props: { common: 'cathode', color: 'red' },
@@ -219,141 +263,27 @@ ${DELAY_MS}`,
       ]
     },
     {
-      id: 'counter',
-      name: 'Button counter (7-seg)',
-      description: 'Count button presses (with debouncing) and show the count on a 7-segment display.',
-      code: `# ============================================================
-#  Button press counter
-#  Every press of the button on GPIO10 increments a counter
-#  shown on the 7-segment display (segments on GPIO0..GPIO7).
-# ============================================================
-        .equ GPIO_BASE,         0x60004000
-        .equ GPIO_OUT,          0x04
-        .equ GPIO_ENABLE_W1TS,  0x24
-        .equ GPIO_IN,           0x3C
-${MCU_SEL_EQU}        .equ FUN_WPU,           1 << 8   # weak pull-up
-        .equ FUN_IE,            1 << 9   # input enable
-        .equ SYSTIMER_BASE,     0x60023000
-        .equ SEG_MASK,          0xFF
-        .equ BTN_PIN,           10
-
-        .data
-digits: .byte   0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
-
-        .text
-main:
-        li      s0, GPIO_BASE
-        li      t0, SEG_MASK
-        sw      t0, GPIO_ENABLE_W1TS(s0)
-${GPIO_FUNC(4, 7)}        la      s1, digits
-        # IO_MUX_GPIOn_REG: input enable + pull-up (the button connects the pin to GND)
-        li      t0, IO_MUX_BASE + 4 + 4 * BTN_PIN
-        li      t1, FUN_IE | FUN_WPU
-        sw      t1, 0(t0)
-        li      s2, 0                   # count
-        li      s3, 1 << BTN_PIN
-        li      s4, 1                   # previous button level (1 = released)
-
-loop:
-        mv      a0, s2
-        call    show_digit
-
-        lw      t0, GPIO_IN(s0)
-        and     t0, t0, s3
-        snez    t0, t0                  # t0 = current level (0 = pressed)
-        beq     t0, s4, loop            # no change
-        mv      s4, t0
-        bnez    t0, debounce            # rising edge (release): just debounce
-
-        addi    s2, s2, 1               # falling edge (press): count it
-        li      t1, 10
-        blt     s2, t1, debounce
-        li      s2, 0
-debounce:
-        li      a0, 20                  # ignore contact bounce for 20 ms
-        call    delay_ms
-        j       loop
-
-# show_digit(a0 = 0..9)
-show_digit:
-        add     t0, s1, a0
-        lbu     t1, 0(t0)
-        lw      t2, GPIO_OUT(s0)
-        andi    t2, t2, ~SEG_MASK
-        or      t2, t2, t1
-        sw      t2, GPIO_OUT(s0)
-        ret
-${DELAY_MS}`,
+      id: 'sevenseg-xiao',
+      name: '7-segment counter',
+      description: 'Count 0-9 on a common-cathode 7-segment display: segments a..f on D0..D5 (GPIO2..7), g on D10 (GPIO10), dp on D7 (GPIO20).',
+      code: SEVENSEG([2, 3, 4, 5, 6, 7, 10, 20]),
       components: [
         {
-          id: 'seg1', type: 'sevenseg', x: 300, y: 60, props: { common: 'cathode', color: 'green' },
-          conn: { a: 0, b: 1, c: 2, d: 3, e: 4, f: 5, g: 6, dp: 7 }
-        },
-        { id: 'btn1', type: 'button', x: 320, y: 270, props: { color: 'blue', mode: 'pullup', key: ' ' }, conn: { '1': 10 } }
-      ]
-    },
-    {
-      id: 'traffic',
-      name: 'Traffic light',
-      description: 'Table-driven traffic light sequence on three LEDs (GPIO3, GPIO4, GPIO5).',
-      code: `# ============================================================
-#  Traffic light - a table-driven state machine.
-#  Red = GPIO3, Yellow = GPIO4, Green = GPIO5
-# ============================================================
-        .equ GPIO_BASE,         0x60004000
-        .equ GPIO_OUT,          0x04
-        .equ GPIO_ENABLE_W1TS,  0x24
-        .equ SYSTIMER_BASE,     0x60023000
-${MCU_SEL_EQU}        .equ RED,               1 << 3
-        .equ YELLOW,            1 << 4
-        .equ GREEN,             1 << 5
-        .equ ALL,               RED | YELLOW | GREEN
-
-        .data
-        .align  2
-states: #       lights          duration (ms)
-        .word   GREEN,          3000
-        .word   YELLOW,         1000
-        .word   RED,            3000
-        .word   RED | YELLOW,   800
-states_end:
-
-        .text
-main:
-        li      s0, GPIO_BASE
-        li      t0, ALL
-        sw      t0, GPIO_ENABLE_W1TS(s0)
-${GPIO_FUNC(4, 5)}
-restart:
-        la      s1, states              # s1 = current table entry
-next:
-        lw      t1, 0(s1)               # lights for this state
-        lw      t2, GPIO_OUT(s0)
-        andi    t2, t2, ~ALL
-        or      t2, t2, t1
-        sw      t2, GPIO_OUT(s0)
-
-        lw      a0, 4(s1)               # how long to stay
-        call    delay_ms
-
-        addi    s1, s1, 8               # advance to next entry
-        la      t0, states_end
-        bltu    s1, t0, next
-        j       restart
-${DELAY_MS}`,
-      components: [
-        { id: 'led1', type: 'led', x: 300, y: 60, props: { color: 'red', activeLow: false }, conn: { A: 3 } },
-        { id: 'led2', type: 'led', x: 370, y: 60, props: { color: 'yellow', activeLow: false }, conn: { A: 4 } },
-        { id: 'led3', type: 'led', x: 440, y: 60, props: { color: 'green', activeLow: false }, conn: { A: 5 } }
+          id: 'seg1', type: 'sevenseg', x: 300, y: 120, props: { common: 'cathode', color: 'red' },
+          conn: { a: 2, b: 3, c: 4, d: 5, e: 6, f: 7, g: 10, dp: 20 }
+        }
       ]
     },
     {
       id: 'uart',
       name: 'UART hello + echo',
-      description: 'Print a greeting through the UART0 FIFO register and echo what you type in the serial monitor. (On a SuperMini or XIAO ESP32C3, UART0 is on GPIO20/21, not on USB: use the USB-Serial-JTAG example there.)',
+      description: 'Print a greeting through the UART0 registers and echo what you type in the serial monitor. On the DevKitM-1, UART0 reaches the computer through the CP2102 USB-UART chip, so it works on the real board too.',
       code: `# ============================================================
 #  UART0: print a greeting, then echo every received character.
 #  Type in the Serial Monitor input box and press Enter.
+#  On the DevKitM-1, UART0 (TX GPIO21, RX GPIO20) is wired to the
+#  CP2102 USB-UART chip: on the real board the text appears in
+#  the serial monitor too.
 # ============================================================
         .equ UART0_BASE,        0x60000000
         .equ UART_FIFO,         0x00
@@ -424,174 +354,13 @@ uart_puts:
       ]
     },
     {
-      id: 'syscalls',
-      name: 'Fibonacci (ecall services)',
-      description: 'Uses the ecall services (print, sleep, exit) to print Fibonacci numbers.',
-      code: `# ============================================================
-#  Fibonacci numbers using the simulator's ecall services
-#  (RARS-style: a7 = service number, a0 = argument).
-#  Real hardware has no OS to answer an ecall: Hardware ▸ Run on
-#  board adds a small runtime that implements them over USB / UART.
-#
-#    a7 = 1  print int      a7 = 4  print string
-#    a7 = 11 print char     a7 = 32 sleep a0 ms
-#    a7 = 93 exit(a0)
-# ============================================================
-        .data
-title:  .asciz  "First 25 Fibonacci numbers:\\n"
-
-        .text
-main:
-        la      a0, title
-        li      a7, 4
-        ecall
-
-        li      s0, 0           # F(n)
-        li      s1, 1           # F(n+1)
-        li      s2, 25          # how many to print
-loop:
-        mv      a0, s0
-        li      a7, 1           # print int
-        ecall
-        li      a0, '\\n'
-        li      a7, 11          # print char
-        ecall
-        li      a0, 100
-        li      a7, 32          # sleep 100 ms
-        ecall
-
-        add     t0, s0, s1
-        mv      s0, s1
-        mv      s1, t0
-        addi    s2, s2, -1
-        bnez    s2, loop
-
-        li      a0, 0
-        li      a7, 93          # exit(0)
-        ecall
-`,
-      components: []
-    },
-    {
-      id: 'mini-blink',
-      board: 'supermini',
-      name: 'SuperMini: blink the on-board LED',
-      description: 'Blink the blue LED on GPIO8 (lit when the pin is LOW) and report it on the serial monitor. Try it on a real board with Hardware ▸ Run on board.',
-      code: `# ============================================================
-#  ESP32-C3 SuperMini: blink the on-board blue LED.
-#  The LED sits between 3V3 and GPIO8, so it lights up when
-#  GPIO8 is driven LOW (active low).
-#  Runs in the simulator and on a real board (Hardware menu).
-# ============================================================
-        .equ GPIO_BASE,         0x60004000
-        .equ GPIO_OUT_W1TS,     0x08
-        .equ GPIO_OUT_W1TC,     0x0C
-        .equ GPIO_ENABLE_W1TS,  0x24
-        .equ SYSTIMER_BASE,     0x60023000
-        .equ LED_PIN,           8
-
-        .data
-msg_on:  .asciz "LED on\\n"
-msg_off: .asciz "LED off\\n"
-
-        .text
-main:
-        li      s0, GPIO_BASE
-        li      s1, 1 << LED_PIN
-        sw      s1, GPIO_OUT_W1TS(s0)   # start with the LED off (pin HIGH)
-        sw      s1, GPIO_ENABLE_W1TS(s0)
-
-loop:
-        sw      s1, GPIO_OUT_W1TC(s0)   # pin LOW  -> LED on
-        la      a0, msg_on
-        li      a7, 4                   # ecall: print string
-        ecall
-        li      a0, 500
-        call    delay_ms
-
-        sw      s1, GPIO_OUT_W1TS(s0)   # pin HIGH -> LED off
-        la      a0, msg_off
-        li      a7, 4
-        ecall
-        li      a0, 500
-        call    delay_ms
-        j       loop
-${DELAY_MS}`,
-      components: []
-    },
-    {
-      id: 'mini-boot',
-      board: 'supermini',
-      name: 'SuperMini: BOOT button toggles the LED',
-      description: 'Each press of the BOOT button (GPIO9) toggles the on-board LED (GPIO8) and prints a press counter.',
-      code: `# ============================================================
-#  BOOT button (GPIO9, LOW while pressed) toggles the on-board
-#  LED (GPIO8, active low). Presses are counted and printed.
-#  In the simulator, click the BOOT button on the board.
-# ============================================================
-        .equ GPIO_BASE,         0x60004000
-        .equ GPIO_OUT,          0x04
-        .equ GPIO_ENABLE_W1TS,  0x24
-        .equ GPIO_IN,           0x3C
-        .equ IO_MUX_BASE,       0x60009000
-        .equ FUN_WPU,           1 << 8
-        .equ FUN_IE,            1 << 9
-        .equ SYSTIMER_BASE,     0x60023000
-        .equ LED_PIN,           8
-        .equ BTN_PIN,           9
-
-        .data
-msg:    .asciz "BOOT pressed: "
-
-        .text
-main:
-        li      s0, GPIO_BASE
-        li      s1, 1 << LED_PIN
-        li      s2, 1 << BTN_PIN
-        sw      s1, GPIO_OUT(s0)        # LED off (pin HIGH)
-        sw      s1, GPIO_ENABLE_W1TS(s0)
-        li      t0, IO_MUX_BASE + 4 + 4 * BTN_PIN
-        li      t1, FUN_IE | FUN_WPU    # input + pull-up (already so after reset)
-        sw      t1, 0(t0)
-        li      s3, 0                   # press count
-
-wait_press:
-        lw      t0, GPIO_IN(s0)
-        and     t0, t0, s2
-        bnez    t0, wait_press          # HIGH = released
-        lw      t0, GPIO_OUT(s0)
-        xor     t0, t0, s1              # toggle the LED
-        sw      t0, GPIO_OUT(s0)
-        addi    s3, s3, 1
-        la      a0, msg
-        li      a7, 4
-        ecall
-        mv      a0, s3
-        li      a7, 1                   # print int
-        ecall
-        li      a0, '\\n'
-        li      a7, 11                  # print char
-        ecall
-        li      a0, 30                  # debounce
-        call    delay_ms
-wait_release:
-        lw      t0, GPIO_IN(s0)
-        and     t0, t0, s2
-        beqz    t0, wait_release
-        li      a0, 30
-        call    delay_ms
-        j       wait_press
-${DELAY_MS}`,
-      components: []
-    },
-    {
-      id: 'usb-echo',
-      board: 'supermini',
-      name: 'USB-Serial-JTAG hello + echo',
-      description: 'Talk to the computer through the USB-Serial-JTAG registers (the SuperMini\'s USB-C port): print a greeting and echo what you type.',
+      id: 'uart-usb',
+      name: 'UART hello + echo (USB-C port)',
+      description: 'Talk to the computer through the USB-Serial-JTAG registers, the hardware serial port behind the USB-C connector: print a greeting and echo each line in upper case. (On this board UART0 is on GPIO20/21, not on USB.)',
       code: `# ============================================================
 #  USB-Serial-JTAG: the ESP32-C3's built-in USB serial port
-#  (the USB-C connector of the SuperMini).
+#  (the USB-C connector of the SuperMini and the XIAO ESP32C3;
+#  on these boards UART0 is on GPIO20/21, not on USB).
 #    EP1      (+0x00): write = send a byte, read = received byte
 #    EP1_CONF (+0x04): bit 0 WR_DONE (write 1: send the buffered
 #                      bytes now), bit 1 IN_EP_DATA_FREE (room to
@@ -673,7 +442,6 @@ usb_puts:
 `,
       components: []
     },
-
     {
       id: 'matrix',
       name: 'LED matrix (MAX7219)',
@@ -804,88 +572,6 @@ max_write:
 ${DELAY_MS}`,
       components: [
         { id: 'mx1', type: 'matrix', x: 300, y: 120, props: { modules: '1', color: 'red', vcc: '5V' }, conn: { DIN: 2, CS: 3, CLK: 10 } }
-      ]
-    },
-    {
-      id: 'rgb',
-      name: 'RGB LED colour wheel',
-      description: 'Software PWM on three GPIOs fades a common-cathode RGB LED around the colour wheel: red, green, blue and every mix in between.',
-      code: `# ============================================================
-#  RGB LED colour wheel with software PWM.
-#  Each PWM period has 256 steps; a colour's pin is HIGH while
-#  the step is below its duty (0..255), so its LED is on for
-#  duty/256 of the time. The wheel has 768 positions: red fades
-#  to green, green to blue, blue back to red.
-# ============================================================
-        .equ GPIO_BASE,         0x60004000
-        .equ GPIO_OUT,          0x04
-        .equ GPIO_ENABLE_W1TS,  0x24
-        .equ R_PIN,             2
-        .equ G_PIN,             3
-        .equ B_PIN,             10
-        .equ PERIODS,           250      # PWM periods per wheel position (speed)
-
-        .text
-main:
-        li      s0, GPIO_BASE
-        li      t0, (1 << R_PIN) | (1 << G_PIN) | (1 << B_PIN)
-        sw      t0, GPIO_ENABLE_W1TS(s0)
-        li      s4, 0                   # position on the wheel, 0..767
-
-wheel:
-        # s1, s2, s3 = red, green, blue duty (0..255) at position s4
-        andi    t0, s4, 255             # step within the current third
-        li      t1, 255
-        sub     t1, t1, t0              # 255 - step
-        srli    t2, s4, 8               # which third: 0, 1 or 2
-        li      s1, 0
-        li      s2, 0
-        li      s3, 0
-        beqz    t2, 1f
-        li      t3, 1
-        beq     t2, t3, 2f
-        mv      s3, t1                  # third 2: blue -> red
-        mv      s1, t0
-        j       3f
-1:      mv      s1, t1                  # third 0: red -> green
-        mv      s2, t0
-        j       3f
-2:      mv      s2, t1                  # third 1: green -> blue
-        mv      s3, t0
-3:      li      s5, PERIODS
-4:      call    pwm_period
-        addi    s5, s5, -1
-        bnez    s5, 4b
-        addi    s4, s4, 1
-        li      t0, 768
-        bltu    s4, t0, wheel
-        li      s4, 0
-        j       wheel
-
-# ------------------------------------------------------------
-# pwm_period: one PWM period of 256 steps with duties s1, s2, s3.
-# Every step takes the same number of instructions (no branches
-# per colour), so the time a pin is HIGH matches its duty.
-# Uses s0 = GPIO_BASE. Clobbers t0, t1, t2, t5.
-# ------------------------------------------------------------
-pwm_period:
-        li      t0, 0                   # step
-        li      t5, 256
-1:      sltu    t1, t0, s1              # 1 while step < red duty
-        slli    t1, t1, R_PIN
-        sltu    t2, t0, s2
-        slli    t2, t2, G_PIN
-        or      t1, t1, t2
-        sltu    t2, t0, s3
-        slli    t2, t2, B_PIN
-        or      t1, t1, t2
-        sw      t1, GPIO_OUT(s0)
-        addi    t0, t0, 1
-        bltu    t0, t5, 1b
-        ret
-`,
-      components: [
-        { id: 'rgb1', type: 'rgbled', x: 300, y: 100, props: { common: 'cathode' }, conn: { R: 2, G: 3, B: 10 } }
       ]
     },
     {
@@ -1127,8 +813,8 @@ ${DELAY_MS}`,
         .equ MCU_SEL_GPIO,      1 << 12  # function 1 = GPIOn
         .equ FUN_IE,            1 << 9   # input enable
         .equ SYSTIMER_BASE,     0x60023000
-        .equ RS,                1 << 0   # GPIO0
-        .equ RW,                1 << 1   # GPIO1
+        .equ RS,                1 << 3   # GPIO3
+        .equ RW,                1 << 10  # GPIO10
         .equ E,                 1 << 2   # GPIO2
         .equ DATA_SHIFT,        4        # D4..D7 on GPIO4..7
         .equ DATA,              0xF << DATA_SHIFT
@@ -1341,7 +1027,7 @@ lcd_number:
         ret
 ${DELAY_MS}`,
       components: [
-        { id: 'lcd1', type: 'lcd1602', x: 260, y: 40, props: { color: 'blue', vcc: '5V' }, conn: { RS: 0, RW: 1, E: 2, D4: 4, D5: 5, D6: 6, D7: 7 } }
+        { id: 'lcd1', type: 'lcd1602', x: 260, y: 40, props: { color: 'blue', vcc: '5V' }, conn: { RS: 3, RW: 10, E: 2, D4: 4, D5: 5, D6: 6, D7: 7 } }
       ]
     },
     {
@@ -1639,10 +1325,98 @@ ${DELAY_MS}`,
       ]
     },
     {
-      id: 'lab-chaser',
-      board: 'labc3',
+      id: 'lab-led',
       jumpers: { LED: true, '7S': false, PB: true },
-      name: 'Lab board: LED chaser + 4 buttons',
+      name: 'Blink the LEDs',
+      description: 'Blink the lab board\'s 8 LEDs (GPIO0..7): LED1, 3, 5, 7 and LED2, 4, 6, 8 light in turn every 500 ms.',
+      code: `# ============================================================
+#  Lab board: blink LED1..LED8
+#    LED1..LED8 = GPIO0..7 (lit when HIGH; jumper LED installed)
+#  The odd and the even LEDs light in turn every 500 ms.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT,          0x04
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ SYSTIMER_BASE,     0x60023000
+${MCU_SEL_EQU}        .equ LED_MASK,          0xFF
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      t0, LED_MASK
+        sw      t0, GPIO_ENABLE_W1TS(s0)    # GPIO0..7 = outputs
+${GPIO_FUNC(4, 7)}        li      s1, 0x55                    # LED1, 3, 5, 7
+
+loop:
+        lw      t1, GPIO_OUT(s0)            # read-modify-write so that
+        andi    t1, t1, ~LED_MASK           # other pins keep their state
+        or      t1, t1, s1
+        sw      t1, GPIO_OUT(s0)
+        li      a0, 500
+        call    delay_ms
+        xori    s1, s1, LED_MASK            # 0x55 <-> 0xAA
+        j       loop
+${DELAY_MS}`,
+      components: []
+    },
+    {
+      id: 'lab-button',
+      jumpers: { LED: true, '7S': false, PB: true },
+      name: 'Buttons control LEDs',
+      description: 'LED1..LED4 light while PB1..PB4 are held; each press of PB1..PB4 also toggles LED5..LED8.',
+      code: `# ============================================================
+#  Lab board: buttons -> LEDs
+#    LED1..LED8 = GPIO0..7 (lit when HIGH; jumper LED installed)
+#    PB1..PB4   = GPIO9, 10, 20, 21 (LOW while pressed)
+#  LEDn (n = 1..4) is lit while PBn is held down, and each
+#  press of PBn toggles LED(n+4).
+#  In the simulator, click the buttons or press keys 1..4.
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT,          0x04
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ GPIO_IN,           0x3C
+        .equ SYSTIMER_BASE,     0x60023000
+${MCU_SEL_EQU}${LAB_BUTTONS_EQU}        .equ LED_MASK,          0xFF
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      t0, LED_MASK
+        sw      t0, GPIO_ENABLE_W1TS(s0)    # GPIO0..7 = outputs
+${GPIO_FUNC(4, 7)}${LAB_BUTTONS_SETUP}        li      s1, 0                       # LED5..8 toggled by presses
+
+loop:
+        li      a0, 10                      # check the buttons every 10 ms
+        call    delay_ms
+        call    new_presses                 # a0 = new presses, s5 = held
+        call    pb_bits
+        slli    a0, a0, 4
+        xor     s1, s1, a0                  # a press toggles LED5..8
+        mv      a0, s5
+        call    pb_bits                     # held buttons -> LED1..4
+        or      t1, s1, a0
+        lw      t2, GPIO_OUT(s0)
+        andi    t2, t2, ~LED_MASK
+        or      t2, t2, t1
+        sw      t2, GPIO_OUT(s0)
+        j       loop
+
+# pb_bits(a0 = GPIO bit mask) -> a0 = PB1..PB4 in bits 0..3
+pb_bits:
+        srli    t0, a0, 9
+        andi    t0, t0, 3                   # PB1, PB2 (GPIO9, 10) -> bits 0, 1
+        srli    t1, a0, 18
+        andi    t1, t1, 0xC                 # PB3, PB4 (GPIO20, 21) -> bits 2, 3
+        or      a0, t0, t1
+        ret
+${LAB_NEW_PRESSES}${DELAY_MS}`,
+      components: []
+    },
+    {
+      id: 'lab-chaser',
+      jumpers: { LED: true, '7S': false, PB: true },
+      name: 'LED chaser',
       description: 'Running light on the lab board\'s 8 LEDs (GPIO0..7). PB1 reverses it, PB2 / PB3 make it faster / slower, PB4 pauses it.',
       code: `# ============================================================
 #  Lab board: running light on LED1..LED8, controlled by PB1..PB4
@@ -1713,9 +1487,56 @@ ${LAB_NEW_PRESSES}${DELAY_MS}`,
     },
     {
       id: 'lab-7seg',
-      board: 'labc3',
       jumpers: { LED: false, '7S': true, PB: true },
-      name: 'Lab board: hex counter on the 7-segment display',
+      name: '7-segment counter',
+      description: 'Count 0..9 on the lab board\'s 7-segment display (segments a..g, dp on GPIO0..7), one digit per second.',
+      code: `# ============================================================
+#  Lab board: 7-segment counter, 0..9, one digit per second
+#    segments a..g, dp = GPIO0..7 (common cathode: a HIGH pin
+#    lights its segment; jumper 7S installed)
+# ============================================================
+        .equ GPIO_BASE,         0x60004000
+        .equ GPIO_OUT,          0x04
+        .equ GPIO_ENABLE_W1TS,  0x24
+        .equ SYSTIMER_BASE,     0x60023000
+${MCU_SEL_EQU}        .equ SEG_MASK,          0xFF
+
+        .data
+digits:                                     # bit0 = a ... bit6 = g
+        .byte   0x3F, 0x06, 0x5B, 0x4F, 0x66
+        .byte   0x6D, 0x7D, 0x07, 0x7F, 0x6F
+
+        .text
+main:
+        li      s0, GPIO_BASE
+        li      t0, SEG_MASK
+        sw      t0, GPIO_ENABLE_W1TS(s0)    # GPIO0..7 = outputs
+${GPIO_FUNC(4, 7)}        la      s1, digits
+        li      s2, 0                       # counter
+
+loop:
+        add     t0, s1, s2
+        lbu     t1, 0(t0)                   # segment pattern of the digit
+        lw      t2, GPIO_OUT(s0)            # read-modify-write so that
+        andi    t2, t2, ~SEG_MASK           # other pins keep their state
+        or      t2, t2, t1
+        sw      t2, GPIO_OUT(s0)
+
+        li      a0, 1000
+        call    delay_ms
+
+        addi    s2, s2, 1                   # next digit
+        li      t0, 10
+        blt     s2, t0, loop
+        li      s2, 0
+        j       loop
+${DELAY_MS}`,
+      components: []
+    },
+    {
+      id: 'lab-counter',
+      jumpers: { LED: false, '7S': true, PB: true },
+      name: 'Button counter (7-segment)',
       description: 'Show 0..F on the lab board\'s 7-segment display (GPIO0..7). PB1 counts up, PB2 down, PB3 resets, PB4 toggles the decimal point.',
       code: `# ============================================================
 #  Lab board: hexadecimal counter on the 7-segment display
@@ -1813,7 +1634,17 @@ done:
         j       done
 `;
 
-  const out = { EXAMPLES, BLANK };
+  // Examples shown in the Examples menu for each board (BOARDS ids), in menu order.
+  const KIT = io => ['blink', 'button', io.seg, io.uart, 'lcd', 'lcd-i2c', 'tm1637', 'matrix'];
+  const BOARD_EXAMPLES = {
+    devkitm1: KIT({ seg: 'sevenseg', uart: 'uart' }),
+    supermini: KIT({ seg: 'sevenseg', uart: 'uart-usb' }),
+    xiaoc3: KIT({ seg: 'sevenseg-xiao', uart: 'uart-usb' }),
+    labc3: ['lab-led', 'lab-button', 'lab-chaser', 'lab-7seg', 'lab-counter']
+  };
+  const examplesFor = board => (BOARD_EXAMPLES[board] || []).map(id => EXAMPLES.find(ex => ex.id === id));
+
+  const out = { EXAMPLES, BOARD_EXAMPLES, examplesFor, BLANK };
   if (typeof module !== 'undefined' && module.exports) module.exports = out;
   else Object.assign(root, out);
 })(typeof window !== 'undefined' ? window : globalThis);

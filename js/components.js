@@ -136,12 +136,12 @@
       render(c, o) {
         const manual = o && !o.auto;
         const anode = c.props.common === 'anode';
-        const legs = [[11, 'R', '#ff3b30'], [31, 'G', '#30e04a'], [41, 'B', '#3a8bff']];
+        // the R / G / B legs are drawn in their colour instead of carrying letters
+        const legs = [[11, '#ff3b30'], [31, '#30e04a'], [41, '#3a8bff']];
         return `
           <circle class="glow" cx="26" cy="24" r="27" fill="#fff" opacity="0" filter="url(#glowBlur)"/>
-          ${legs.map(([x]) => `<path d="M${x} 50 V86" class="leg"/>`).join('')}
+          ${legs.map(([x, col]) => `<path d="M${x} 50 V86" class="leg" style="stroke:${col}"/>`).join('')}
           <path d="M21 50 V${manual ? 86 : 78}" class="leg"/>
-          ${legs.map(([x, n, col]) => `<text x="${x}" y="62" class="pol" fill="${col}" text-anchor="middle" style="font-size:7px">${n}</text>`).join('')}
           <path d="M8 48 V24 A18 18 0 0 1 44 24 V48 Z" fill="#e8ebf0" class="lens" opacity="0.35"/>
           <path d="M8 48 V24 A18 18 0 0 1 44 24 V48 Z" fill="url(#lensShine)" stroke="#9aa3b2" stroke-opacity="0.5" stroke-width="0.8" pointer-events="none"/>
           <rect x="5" y="44" width="42" height="6" rx="1.5" fill="#d8dce3" opacity="0.6"/>
@@ -260,13 +260,14 @@
       title: '7-segment display',
       w: 84, h: 132,
       pins: [
-        { name: 'g', label: 'Segment g', x: 12, y: 0, dir: 'up' },
-        { name: 'f', label: 'Segment f', x: 26, y: 0, dir: 'up' },
+        // listed a..g, dp: the order of the connections in the settings panel
         { name: 'a', label: 'Segment a', x: 58, y: 0, dir: 'up' },
         { name: 'b', label: 'Segment b', x: 72, y: 0, dir: 'up' },
-        { name: 'e', label: 'Segment e', x: 12, y: 132, dir: 'down' },
-        { name: 'd', label: 'Segment d', x: 26, y: 132, dir: 'down' },
         { name: 'c', label: 'Segment c', x: 58, y: 132, dir: 'down' },
+        { name: 'd', label: 'Segment d', x: 26, y: 132, dir: 'down' },
+        { name: 'e', label: 'Segment e', x: 12, y: 132, dir: 'down' },
+        { name: 'f', label: 'Segment f', x: 26, y: 0, dir: 'up' },
+        { name: 'g', label: 'Segment g', x: 12, y: 0, dir: 'up' },
         { name: 'dp', label: 'Decimal point', x: 72, y: 132, dir: 'down' }
       ],
       power: [

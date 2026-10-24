@@ -25,7 +25,7 @@
     </div>
 
     <nav class="tb-group">
-      <select id="boardSel" title="Development board shown on the breadboard (pin layout, on-board LED and buttons)"></select>
+      <span class="tb-select"><select id="boardSel" title="Development board shown on the breadboard (pin layout, on-board LED and buttons)"></select></span>
       <div class="menu">
         <button type="button">Examples ▾</button>
         <div class="menu-list wide scroll" id="examplesMenu"></div>
@@ -57,17 +57,17 @@
       <button type="button" class="icon" id="btnPause" title="Pause (F5)" aria-label="Pause">❚❚</button>
       <button type="button" class="icon" id="btnStep" title="Step one instruction (F10)" aria-label="Step"><svg class="mi" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M18.4 8.6C16.55 6.99 14.15 6 11.5 6c-4.65 0-8.58 3.03-9.96 7.22L3.9 14c1.05-3.19 4.05-5.5 7.6-5.5 1.95 0 3.73.72 5.12 1.88L13 14h9V5l-3.6 3.6z"/><circle cx="12" cy="19" r="2.5"/></svg></button>
       <button type="button" class="icon stop" id="btnStop" title="Stop &amp; reset" aria-label="Stop">■</button>
-      <select id="speedSel" title="Simulation clock">
-        <option value="160000000">Real-time (160 MHz)</option>
-        <option value="16000000">1/10 speed</option>
-        <option value="1600000">1/100 speed</option>
+      <span class="tb-select"><select id="speedSel" title="Simulation clock: 160 MHz is real time; at 1 kHz and slower the editor follows each instruction">
+        <option value="160000000" title="Real time">160 MHz</option>
+        <option value="16000000" title="1/10 speed">16 MHz</option>
+        <option value="1600000" title="1/100 speed">1.6 MHz</option>
         <option value="100000">100 kHz</option>
         <option value="10000">10 kHz</option>
-        <option value="1000">1 kHz (trace)</option>
-        <option value="100">100 Hz (trace)</option>
-        <option value="10">10 Hz (trace)</option>
-        <option value="2">2 Hz (trace)</option>
-      </select>
+        <option value="1000" title="Trace: highlights each instruction">1 kHz</option>
+        <option value="100" title="Trace: highlights each instruction">100 Hz</option>
+        <option value="10" title="Trace: highlights each instruction">10 Hz</option>
+        <option value="2" title="Trace: highlights each instruction">2 Hz</option>
+      </select></span>
     </div>
 
     <div class="tb-group hw-controls">
@@ -89,7 +89,6 @@
       <span class="hw-state" id="hwState"></span>
     </div>
 
-    <div class="status" id="status"></div>
   </header>
 
   <main class="layout" id="layout">
@@ -203,7 +202,7 @@
               <li>Write RISC-V (RV32IM) assembly in the editor, or pick one of the <b>Examples</b> (top bar).</li>
               <li>Add parts with the add-part button in the top bar (a dialog lists every part); the button next to it removes all parts. Wire a part by clicking one of its pins and then a <b>GPIO pin</b> on the board (or choose the GPIO in the part's settings panel). Ground / 3V3 are connected automatically while <b>Power supply</b> is set to Automatic in the <b>Settings</b> dialog (gear button in the top bar; it shows an orange dot while Power supply is Manual). <b>Part names</b> in the same dialog shows or hides the names under the parts (led1, seg1, …). <b>Wire style</b> switches between curved wires and horizontal / vertical wires; with the latter, click while wiring to place points. If a point is diagonal to the previous one, the wire bends at a right angle, first along the direction you moved the mouse (move back near the previous point to choose again). Backspace removes the last point. To edit a wire afterwards, click it: drag a round handle to move a corner, drag a bar handle to move a segment (this adds corners where the segment meets a pin), and double-click a corner to remove it. Set Power supply to Manual to wire each part's supply pin to a GND or 3V3 pin yourself: a part without power doesn't work, and the rail you choose sets its wiring mode (for example, an LED's fixed leg on 3V3 makes it active-low).</li>
               <li>On the breadboard: drag a part to move it, drag the background to pan, and scroll to zoom (or use the fit / zoom in / zoom out buttons at the top right of the breadboard). Click a part to open its settings panel.</li>
-              <li>Press the green <b>▶</b> (Run, F5); the wrench button next to it only assembles and lists errors. Use <b>Step</b> (the arrow over a dot, F10), breakpoints (click a line number) and <code>ebreak</code> to debug. Choose a slow speed such as <i>10 Hz (trace)</i> to watch each instruction execute.</li>
+              <li>Press the green <b>▶</b> (Run, F5); the wrench button next to it only assembles and lists errors. Use <b>Step</b> (the arrow over a dot, F10), breakpoints (click a line number) and <code>ebreak</code> to debug. Choose a slow clock (1 kHz or less, such as <i>10 Hz</i>) in the speed list to watch each instruction execute.</li>
             </ol>
 
             <h3>Memory map</h3>
@@ -288,7 +287,7 @@
             <h3>Assembler</h3>
             <p><b>Instructions:</b> all of RV32I and the M extension, plus Zicsr (<code>csrrw/s/c[i]</code>), <code>ecall</code>, <code>ebreak</code>, <code>fence</code>, <code>wfi</code>, <code>mret</code>.<br>
             <b>Pseudo-instructions:</b> <code>nop li la mv not neg seqz snez sltz sgtz beqz bnez blez bgez bltz bgtz bgt ble bgtu bleu j jr jal&nbsp;label ret call tail csrr csrw csrs csrc rdcycle rdtime rdinstret</code>, <code>lw rd, label</code> and <code>sw rs, label, rt</code>.<br>
-            <b>Directives:</b> <code>.text .data .bss .rodata .section .equ/.set (or NAME = value) .word .half .byte .ascii .asciz/.string .space/.zero .align .balign .globl</code>.<br>
+            <b>Directives:</b> <code>.text .data .bss .rodata .section .equ/.eqv/.set (or NAME = value) .word .half .byte .ascii .asciz/.string .space/.zero .align .balign .globl</code>.<br>
             <b>Expressions:</b> <code>+ - * / % &lt;&lt; &gt;&gt; &amp; | ^ ~</code>, parentheses, <code>'c'</code> characters, <code>0x</code>/<code>0b</code> numbers, <code>%hi(sym)</code>/<code>%lo(sym)</code>.<br>
             <b>Labels:</b> <code>name:</code> and numeric local labels (<code>1:</code> referenced as <code>1b</code> / <code>1f</code>). Comments start with <code>#</code>, <code>//</code> or <code>;</code>, or use <code>/* … */</code>.</p>
 
@@ -317,7 +316,7 @@
             <p>At power-up (and whenever the simulation is reset) the chip is in shutdown with every register 0, so a program must at least set the scan limit and leave shutdown. In a chain, send one word per chip between CS LOW and CS HIGH: the first word ends up in the chip farthest from the board (the rightmost module); use no-ops for chips you don't want to change. The module is powered from 5V (or 3V3) and GND when Power supply is Manual. See the <i>LED matrix (MAX7219)</i> example.</p>
 
             <h3>RGB LED</h3>
-            <p>Four legs: <b>R</b>, <b>G</b>, <b>B</b> and the common leg. With a common cathode (to GND) a colour lights while its pin is HIGH; with a common anode (to 3V3) while its pin is LOW (and the chip drives it). The colour shown mixes the three pins by their duty cycle, so software PWM gives any colour: see the <i>RGB LED colour wheel</i> example.</p>
+            <p>Four legs: <b>R</b>, <b>G</b>, <b>B</b> and the common leg; the R, G and B legs are drawn red, green and blue. With a common cathode (to GND) a colour lights while its pin is HIGH; with a common anode (to 3V3) while its pin is LOW (and the chip drives it). The colour shown mixes the three pins by their duty cycle, so software PWM gives any colour.</p>
 
             <h3>4-digit display (TM1637)</h3>
             <p>A 4-digit 7-segment module with a TM1637 driver and two signal pins, <b>CLK</b> and <b>DIO</b>, each pulled up to VCC by 10k on the module (powered from 3V3 or 5V; on a real board use 3V3 so the pull-ups don't put 5V on the ESP32-C3 pins). The protocol looks like I2C but has no address and sends bytes LSB first:</p>
@@ -365,7 +364,7 @@
             <p>Differences on the real chip: the CPU runs at <b>20 MHz</b> (the simulator: 160 MHz), so time delays with SYSTIMER rather than instruction loops. The ESP32-C3 has no <code>cycle</code> / <code>time</code> / <code>instret</code> CSRs; the runtime emulates them with the chip's cycle counter (CSR 0x7E2, upper halves read 0). On the SuperMini and the XIAO ESP32C3, UART0 is on GPIO20/21, not on the USB-C port.</p>
 
             <h3>Keyboard</h3>
-            <p><kbd>F5</kbd> run/pause · <kbd>F10</kbd> step · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> restart · <kbd>Ctrl</kbd>+<kbd>S</kbd> save in browser · <kbd>Ctrl</kbd>+<kbd>B</kbd> show/hide the code editor · <kbd>Ctrl</kbd>+<kbd>J</kbd> show/hide the bottom panels · <kbd>Del</kbd> delete selected part/wire · <kbd>Esc</kbd> cancel wiring. Buttons can be given a keyboard key in their settings.</p>
+            <p><kbd>F5</kbd> run/pause · <kbd>F10</kbd> step · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> restart · <kbd>Ctrl</kbd>+<kbd>S</kbd> save in browser · <kbd>Ctrl</kbd>+<kbd>/</kbd> comment / uncomment the selected lines · <kbd>Ctrl</kbd>+<kbd>B</kbd> show/hide the code editor · <kbd>Ctrl</kbd>+<kbd>J</kbd> show/hide the bottom panels · <kbd>Del</kbd> delete selected part/wire · <kbd>Esc</kbd> cancel wiring. Buttons can be given a keyboard key in their settings.</p>
           </section>
         </div>
       </div>

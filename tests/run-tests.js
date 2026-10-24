@@ -2,7 +2,7 @@
 'use strict';
 const RVAsm = require('../js/assembler.js');
 const { ESP32C3 } = require('../js/esp32c3.js');
-const { EXAMPLES } = require('../js/examples.js');
+const { EXAMPLES, BOARD_EXAMPLES } = require('../js/examples.js');
 
 let failed = 0, passed = 0;
 function check(name, cond, info) {
@@ -167,6 +167,12 @@ fact:   addi sp, sp, -8
   check('load fault', res === 'error' && /Load access fault/.test(m.error.message), m.error && m.error.message);
 }
 
+{ // .eqv (RARS / MARS) is .equ: a constant that can't be redefined
+  const r = RVAsm.assemble('.eqv LED, 2\n.equ MASK, 1 << LED\nmain: li a0, MASK\n');
+  const dup = RVAsm.assemble('.eqv A, 1\n.eqv A, 2\n');
+  check('.eqv defines a constant', r.ok && r.constants.MASK === 4 && !dup.ok && /Duplicate/.test(dup.errors[0].message), JSON.stringify([r.errors, r.constants]));
+}
+
 // ---- examples assemble + behave
 for (const ex of EXAMPLES) {
   const r = RVAsm.assemble(ex.code);
@@ -210,16 +216,30 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   m.run(CPU_HZ * 1.5, null, Infinity);
   const d1 = m.levels() & 0xff;
   check('7-seg digits', d0 === 0x3f && d1 === 0x06, [hex(d0), hex(d1)]);
+  // XIAO wiring: a..f on GPIO2..7, g on GPIO10, dp on GPIO20 (switched from U0RXD to GPIO)
+  const x = exampleMachine('sevenseg-xiao');
+  x.run(CPU_HZ * 2.5, null, Infinity);
+  const two = x.levels() & ((0x3F << 2) | (1 << 10) | (1 << 20));                  // 2 = a, b, d, e, g
+  check('7-seg digits on the XIAO pins', two === ((0x1B << 2) | (1 << 10)) && x.pinFunction(20) === 'GPIO20', hex(two));
 }
 
-{ // counter: press 3 times
-  const m = exampleMachine('counter');
-  let t = 0;
-  const adv = ms => { t += ms / 1000 * CPU_HZ; m.run(t, null, Infinity); };
-  const pressed = { force: 1 << 10, value: 0 }, released = {};
-  m.setExternal(released); adv(10);
-  for (let i = 0; i < 3; i++) { m.setExternal(pressed); adv(60); m.setExternal(released); adv(60); }
-  check('counter example', (m.levels() & 0xff) === 0x4f, hex(m.levels() & 0xff));
+{ // Examples menu: each board lists existing examples, every example is listed somewhere
+  const { BOARDS } = require('../js/boards.js');
+  const listed = new Set(Object.values(BOARD_EXAMPLES).flat());
+  const ids = new Set(EXAMPLES.map(e => e.id));
+  check('per-board example lists', Object.keys(BOARD_EXAMPLES).every(b => BOARDS[b]) && [...listed].every(id => ids.has(id)) &&
+    EXAMPLES.every(e => listed.has(e.id)) && BOARD_EXAMPLES.labc3.length === 5 && BOARD_EXAMPLES.xiaoc3.length === 8,
+    JSON.stringify(BOARD_EXAMPLES));
+  // the wiring of each example only uses GPIOs of the boards that list it
+  const bad = [];
+  for (const [b, list] of Object.entries(BOARD_EXAMPLES)) {
+    for (const id of list) {
+      for (const c of EXAMPLES.find(e => e.id === id).components) {
+        for (const [pin, g] of Object.entries(c.conn)) if (typeof g === 'number' && !BOARDS[b].gpios.includes(g)) bad.push(`${b}/${id}/${c.id}.${pin}=${g}`);
+      }
+    }
+  }
+  check('example wiring fits each board', !bad.length, bad.join(', '));
 }
 
 { // IO_MUX: reset values, FUN_IE gating, internal pulls, floating detection
@@ -274,15 +294,6 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   check('GPIO21 as GPIO floats', ((m.floatingPins() >> 21) & 1) === 1, hex(m.floatingPins()));
 }
 
-{ // traffic light: green first, then yellow (GPIO4, 5 need MCU_SEL = 1)
-  const m = exampleMachine('traffic');
-  m.run(CPU_HZ * 1, null, Infinity);
-  const a = (m.levels() >> 3) & 7;
-  m.run(CPU_HZ * 3.5, null, Infinity);
-  const b = (m.levels() >> 3) & 7;
-  check('traffic example', a === 4 && b === 2 && m.noFnWrites === 0, [a, b]);
-}
-
 { // uart echo
   const m = exampleMachine('uart');
   m.run(2e6, null, Infinity);
@@ -295,36 +306,12 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   check('uart echo', echo === 'hi', JSON.stringify(echo));
 }
 
-{ // syscalls
-  const m = exampleMachine('syscalls');
-  const res = m.run(CPU_HZ * 10, null, Infinity);
-  const out = Buffer.from(m.tx).toString();
-  check('fibonacci', res === 'halt' && out.includes('46368\n'), res + ' ' + JSON.stringify(out.slice(-40)));
-}
-
-{ // SuperMini examples: on-board LED on GPIO8 (active low), BOOT button, USB-Serial-JTAG echo
-  let m = exampleMachine('mini-blink');
-  m.run(CPU_HZ * 0.25, null, Infinity);
-  const on = (m.levels() >> 8) & 1;
-  m.run(CPU_HZ * 0.75, null, Infinity);
-  const off = (m.levels() >> 8) & 1;
-  check('mini-blink drives GPIO8 low then high', on === 0 && off === 1 && Buffer.from(m.tx).toString().startsWith('LED on\nLED off\n'), [on, off]);
-
-  m = exampleMachine('mini-boot');
-  m.setExternal({ pullUp: 1 << 9 });
-  m.run(CPU_HZ * 0.05, null, Infinity);
-  m.setExternal({ force: 1 << 9, value: 0, pullUp: 1 << 9 });          // press BOOT
-  m.run(CPU_HZ * 0.15, null, Infinity);
-  m.setExternal({ pullUp: 1 << 9 });                                   // release
-  m.run(CPU_HZ * 0.3, null, Infinity);
-  check('mini-boot counts a press and toggles the LED', Buffer.from(m.tx).toString() === 'BOOT pressed: 1\n' && ((m.levels() >> 8) & 1) === 0,
-    JSON.stringify(Buffer.from(m.tx).toString()));
-
-  m = exampleMachine('usb-echo');
+{ // SuperMini / XIAO UART example: hello + echo over the USB-Serial-JTAG model
+  const m = exampleMachine('uart-usb');
   m.run(2e5, null, Infinity);
   m.uartReceive([...Buffer.from('hi!\n')]);
   m.run(4e5, null, Infinity);
-  check('usb-echo over the USB-Serial-JTAG model', Buffer.from(m.tx).toString().endsWith('Type something:\nHI!\n'), JSON.stringify(Buffer.from(m.tx).toString()));
+  check('uart-usb over the USB-Serial-JTAG model', Buffer.from(m.tx).toString().endsWith('Type something:\nHI!\n'), JSON.stringify(Buffer.from(m.tx).toString()));
 }
 
 { // Lab board examples: LEDs / 7-seg on GPIO0..7, PB1..PB4 on GPIO9, 10, 20, 21 (pulled up by jumper PB)
@@ -352,7 +339,7 @@ const CPU_HZ = ESP32C3.CPU_HZ;
     first === 0x01 && second === 0x02 && (back === 0x01 || back === 0x80) && paused === (m.levels() & 0xFF) && m.pinFunction(21) === 'GPIO21',
     [first, second, back, paused, m.levels() & 0xFF].map(v => v.toString(16)).join());
 
-  m = exampleMachine('lab-7seg');
+  m = exampleMachine('lab-counter');
   m.setExternal({ pullUp: PULL });
   m.run(CPU_HZ * 0.02, null, Infinity);
   const zero = m.levels() & 0xFF;
@@ -363,10 +350,36 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   const fdp = m.levels() & 0xFF;
   press(m, 2);                                                          // PB3 (GPIO20): reset
   const out = Buffer.from(m.tx).toString();
-  check('lab-7seg counts with PB1..PB3 and toggles the dot with PB4',
+  check('lab-counter counts with PB1..PB3 and toggles the dot with PB4',
     zero === 0x3F && three === 0x4F && fdp === 0xF1 && (m.levels() & 0xFF) === 0xBF &&
     out === 'value = 1\nvalue = 2\nvalue = 3\nvalue = 2\nvalue = 1\nvalue = 0\nvalue = 15\nvalue = 15\nvalue = 0\n',
     [zero, three, fdp, m.levels() & 0xFF].map(v => v.toString(16)).join() + ' ' + JSON.stringify(out));
+
+  m = exampleMachine('lab-led');
+  m.run(CPU_HZ * 0.25, null, Infinity);
+  const odd = m.levels() & 0xFF;
+  m.run(CPU_HZ * 0.75, null, Infinity);
+  check('lab-led blinks the odd and the even LEDs in turn', odd === 0x55 && (m.levels() & 0xFF) === 0xAA, [odd, m.levels() & 0xFF].map(v => v.toString(16)).join());
+
+  m = exampleMachine('lab-button');
+  m.setExternal({ pullUp: PULL });
+  m.run(CPU_HZ * 0.03, null, Infinity);
+  const idle = m.levels() & 0xFF;
+  m.setExternal({ force: 1 << PB[2], value: 0, pullUp: PULL });          // hold PB3 (GPIO20)
+  m.run(m.core.cycle + CPU_HZ * 0.05, null, Infinity);
+  const held = m.levels() & 0xFF;
+  m.setExternal({ pullUp: PULL });
+  m.run(m.core.cycle + CPU_HZ * 0.05, null, Infinity);
+  const after = m.levels() & 0xFF;
+  press(m, 2);                                                          // PB3 again: LED7 off
+  check('lab-button: PB3 lights LED3 while held and toggles LED7', idle === 0 && held === 0x44 && after === 0x40 && (m.levels() & 0xFF) === 0,
+    [idle, held, after, m.levels() & 0xFF].map(v => v.toString(16)).join());
+
+  m = exampleMachine('lab-7seg');
+  m.run(CPU_HZ * 0.5, null, Infinity);
+  const s0 = m.levels() & 0xFF;
+  m.run(CPU_HZ * 1.5, null, Infinity);
+  check('lab-7seg counts 0, 1, ...', s0 === 0x3F && (m.levels() & 0xFF) === 0x06, [s0, m.levels() & 0xFF].map(v => v.toString(16)).join());
 }
 
 // ---- MAX7219: serial protocol, registers, daisy chain, and the matrix example end to end
@@ -456,13 +469,27 @@ const CPU_HZ = ESP32C3.CPU_HZ;
   check('tm1637 example reports a missing ACK', Buffer.from(alone.tx).toString().startsWith('No ACK'), Buffer.from(alone.tx).toString());
 }
 
-{ // RGB colour wheel: in the first third red fades into green (R + G = full), blue stays off
-  const m = exampleMachine('rgb');
-  m.run(CPU_HZ * 0.4, null, Infinity);
+{ // sampleDuty: software PWM on GPIO2 at 25 % duty
+  const m = new ESP32C3();
+  m.load(RVAsm.assemble(`
+main:   li   s0, 0x60004000
+        li   s1, 1 << 2
+        sw   s1, 0x24(s0)
+loop:   sw   s1, 0x08(s0)       # HIGH for 100 iterations
+        li   t0, 100
+1:      addi t0, t0, -1
+        bnez t0, 1b
+        sw   s1, 0x0C(s0)       # LOW for 300
+        li   t0, 300
+2:      addi t0, t0, -1
+        bnez t0, 2b
+        j    loop
+`));
+  m.run(100000, null, Infinity);
   m.sampleDuty();
-  m.run(CPU_HZ * 0.45, null, Infinity);
-  const d = m.sampleDuty(), r = d[2], g = d[3], b = d[10];
-  check('rgb example mixes red and green by PWM', Math.abs(r + g - 1) < 0.03 && g > 0.2 && r > 0.2 && b === 0, [r, g, b].map(v => v.toFixed(3)).join());
+  m.run(1100000, null, Infinity);
+  const d = m.sampleDuty()[2];
+  check('sampleDuty measures PWM duty', Math.abs(d - 0.25) < 0.02, d.toFixed(3));
 }
 
 // ---- LCD1602: HD44780 in 4-bit mode, the PCF8574 I2C backpack, and both examples end to end

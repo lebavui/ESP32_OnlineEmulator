@@ -16,8 +16,8 @@ npx serve .          # or: python -m http.server
 
 ## Features
 
-- **Editor:** syntax highlighting, line numbers, breakpoints (click a line number) and error markers.
-- **Assembler:** a two-pass RV32IM + Zicsr assembler with the GNU-as style directives, the standard pseudo-instructions, expressions, `%hi/%lo`, and local labels (`1:` / `1b` / `1f`).
+- **Editor:** syntax highlighting, line numbers, breakpoints (click a line number), error markers and <kbd>Ctrl</kbd>+<kbd>/</kbd> to comment / uncomment the selected lines.
+- **Assembler:** a two-pass RV32IM + Zicsr assembler with the GNU-as style directives (plus `.eqv`, the RARS / MARS name for `.equ`), the standard pseudo-instructions, expressions, `%hi/%lo`, and local labels (`1:` / `1b` / `1f`).
 - **CPU:** an RV32IM interpreter at a nominal 160 MHz. The status bar shows the simulation speed relative to real time.
 - **ESP32-C3 model:**
   - 384 KB SRAM, mapped twice (code at `0x40380000`, data at `0x3FCA0000`).
@@ -50,7 +50,7 @@ npx serve .          # or: python -m http.server
 - **Layout:** drag the dividers to resize the editor, breadboard and bottom panels. The arrow buttons on the dividers (or <kbd>Ctrl</kbd>+<kbd>B</kbd> / <kbd>Ctrl</kbd>+<kbd>J</kbd>) hide or show the code editor and the bottom panels (serial monitor, messages, registers, …) to give the breadboard more room; a dot on the bottom divider's button means new serial output or a warning arrived while they were hidden. The layout is remembered in the browser.
 - **Light / dark theme:** the ☀ / ☾ button in the top bar. It follows the system setting until you pick one.
 - **Projects:**
-  - 17 built-in examples: 3 for the SuperMini's on-board LED, BOOT button and USB serial port, 2 for the lab board (LED chaser, 7-segment hex counter)
+  - Built-in examples for the selected board (the Examples menu changes with the board): on the DevKitM-1, SuperMini and XIAO ESP32C3 blink, button → LED, 7-segment counter, UART hello + echo (UART0 through the DevKitM-1's CP2102, the USB-C port's USB-Serial-JTAG on the SuperMini / XIAO, so they also work on a real board), LCD1602 4-bit and I2C, TM1637 and MAX7219; on the lab board LED blink, buttons → LEDs, LED chaser, 7-segment counter and button counter
   - Autosave in the browser
   - Save/open `.json` projects or `.S` source files
   - Share links that carry the whole project in the URL

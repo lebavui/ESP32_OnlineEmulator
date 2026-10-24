@@ -574,12 +574,12 @@
             case '.text': cur = 'text'; break;
             case '.data': case '.bss': case '.rodata': case '.sdata': case '.sbss': cur = 'data'; break;
             case '.section': cur = /^\.text/.test(a[0] || '') ? 'text' : 'data'; break;
-            case '.equ': case '.set': {
+            case '.equ': case '.set': case '.eqv': {   // .eqv: the RARS / MARS spelling of .equ
               if (a.length !== 2) throw new Error(`${st.op} expects: ${st.op} NAME, value`);
               const name = a[0];
               if (!/^[A-Za-z_.$][\w.$]*$/.test(name)) throw new Error(`Invalid symbol name '${name}'`);
               if (labels.has(name)) throw new Error(`Duplicate symbol '${name}'`);
-              if (equs.has(name) && st.op === '.equ') throw new Error(`Duplicate symbol '${name}'`);
+              if (equs.has(name) && st.op !== '.set') throw new Error(`Duplicate symbol '${name}'`);
               equs.set(name, { expr: a[1], pos: i });
               break;
             }

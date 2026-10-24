@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  const { RVAsm, ESP32C3, PARTS, EXAMPLES, BLANK, BOARDS, DEFAULT_BOARD, Firmware, Flasher, MAX7219Chain, TM1637, HD44780, LCDI2C } = window;
+  const { RVAsm, ESP32C3, PARTS, EXAMPLES, examplesFor, BLANK, BOARDS, DEFAULT_BOARD, Firmware, Flasher, MAX7219Chain, TM1637, HD44780, LCDI2C } = window;
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -210,8 +210,34 @@
       const lineStart = v.lastIndexOf('\n', s - 1) + 1;
       const indent = /^[ \t]*/.exec(v.slice(lineStart, s))[0];
       insertText('\n' + indent);
+    } else if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === '/' || e.code === 'Slash')) {
+      e.preventDefault();
+      toggleComment();
     }
   });
+
+  // Ctrl+/: comment out the selected lines with '# ', or uncomment them if they all are comments.
+  function toggleComment() {
+    const v = ta.value;
+    let s = ta.selectionStart, end = ta.selectionEnd;
+    if (end > s && v[end - 1] === '\n') end--;           // a selection up to a line start leaves that line alone
+    s = v.lastIndexOf('\n', s - 1) + 1;
+    const nl = v.indexOf('\n', end);
+    end = nl < 0 ? v.length : nl;
+    const lines = v.slice(s, end).split('\n');
+    const code = lines.filter(l => l.trim());
+    if (!code.length) return;
+    const uncomment = code.every(l => /^\s*#/.test(l));
+    const indent = Math.min(...code.map(l => /^\s*/.exec(l)[0].length));
+    const out = lines.map(l => {
+      if (!l.trim()) return l;
+      if (uncomment) return l.replace(/^(\s*)# ?/, '$1');
+      return l.slice(0, indent) + '# ' + l.slice(indent);
+    }).join('\n');
+    ta.setSelectionRange(s, end);
+    insertText(out);
+    ta.setSelectionRange(s, s + out.length);
+  }
 
   gutter.addEventListener('click', e => {
     const g = e.target.closest('.gl');
@@ -280,7 +306,6 @@
   // ================================================================ simulation control
 
   let simTarget = 0, lastTs = 0, skipBp = false;
-  let speedWindow = { sim: 0, real: 0, pct: 0 };
   let lastPanelUpdate = 0;
 
   function rate() { return +$('#speedSel').value; }
@@ -320,7 +345,6 @@
     simState = 'running';
     lastTs = performance.now();
     simTarget = machine.core.cycle;
-    speedWindow = { sim: 0, real: 0, pct: speedWindow.pct };
     setCurrentLine(0);
     updateControls();
     requestAnimationFrame(frame);
@@ -398,19 +422,10 @@
     if (dt < 0) dt = 0;
     const hz = rate();
     simTarget += dt / 1000 * hz;
-    const before = machine.core.cycle;
     const t0 = performance.now();
     const r = machine.run(simTarget, activeBps, t0 + 13, skipBp);
     skipBp = false;
     if (r === 'time' || machine.core.cycle < simTarget - hz * 0.02) simTarget = Math.max(machine.core.cycle, simTarget - hz * 0.02);
-
-    speedWindow.sim += machine.core.cycle - before;
-    speedWindow.real += dt;
-    if (speedWindow.real >= 500) {
-      speedWindow.pct = (speedWindow.sim / CPU_HZ) / (speedWindow.real / 1000) * 100;
-      speedWindow.sim = 0;
-      speedWindow.real = 0;
-    }
 
     if (r !== 'budget' && r !== 'time') handleStop(r);
     if (simState === 'running' && hz <= 1000) showPc(true);
@@ -433,36 +448,10 @@
     updateModified();
   }
 
-  function updateStatus() {
-    const t = machine.timeSeconds;
-    const time = t < 10 ? t.toFixed(3) : t.toFixed(2);
-    let txt;
-    switch (simState) {
-      case 'running': {
-        const hz = rate();
-        const sp = hz >= CPU_HZ ? `${Math.min(999, speedWindow.pct).toFixed(0)}%` : `${$('#speedSel').selectedOptions[0].textContent}`;
-        txt = `<b class="st-run">● Running</b> <span>${sp}</span>`;
-        break;
-      }
-      case 'paused': txt = `<b class="st-pause">❚❚ Paused</b> <span>pc ${hex8(machine.core.pc)}${currentLine ? ' · line ' + currentLine : ''}</span>`; break;
-      case 'halted': txt = machine.error ? '<b class="st-err">✖ Error</b>' : '<b class="st-stop">■ Exited</b>'; break;
-      default: txt = '<b class="st-stop">○ Stopped</b>';
-    }
-    $('#status').innerHTML = `${txt}<span class="mono">t = ${time} s</span><span class="mono dim">${fmtCount(machine.core.instret)} instr</span>`;
-  }
-
-  function fmtCount(n) {
-    if (n >= 1e9) return (n / 1e9).toFixed(2) + ' G';
-    if (n >= 1e6) return (n / 1e6).toFixed(2) + ' M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + ' k';
-    return String(n);
-  }
-
   function updateAll(force) {
     checkInputWarnings();
     updateStage();
     flushSerial();
-    updateStatus();
     const now = performance.now();
     if (force || now - lastPanelUpdate > 120) {
       lastPanelUpdate = now;
@@ -707,6 +696,7 @@
     }));
     renderBoard();
     $('#boardSel').value = boardId;
+    renderExamples();
   }
 
   function renderBoard() {
@@ -1293,7 +1283,7 @@
       ${pins}
       ${power}
       ${warn}
-      ${c.type === 'sevenseg' ? '<div class="insp-actions"><button data-act="autowire">Auto-wire to GPIO0…7</button></div>' : ''}
+      ${c.type === 'sevenseg' && [0, 1, 2, 3, 4, 5, 6, 7].every(g => GPIO_PINS.includes(g)) ? '<div class="insp-actions"><button data-act="autowire">Auto-wire to GPIO0…7</button></div>' : ''}
       <div class="insp-actions"><button class="danger" data-act="delete">Delete part</button></div>`;
   }
 
@@ -1421,7 +1411,7 @@
       props: Object.assign({}, def.defaults), conn: {}, route: {}
     };
     comps.push(c);
-    selection = simActive() ? null : { kind: 'comp', id: c.id };
+    selection = null;                    // the settings panel opens only when the user clicks the part
     afterPartsChanged();
     toast(`Added ${def.title}. Click one of its pins, then a GPIO pin on the board.`);
   }
@@ -2423,10 +2413,12 @@ Serial port: ${portLabel(port)}` : '');
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   }
 
-  // examples menu
+  // examples menu: the examples of the selected board (setBoard() rebuilds it)
   const exMenu = $('#examplesMenu');
-  exMenu.innerHTML = EXAMPLES.map(ex =>
-    `<button data-ex="${ex.id}"><b>${esc(ex.name)}</b><span>${esc(ex.description)}</span></button>`).join('');
+  function renderExamples() {
+    $('#examplesMenu').innerHTML = examplesFor(boardId).map(ex =>
+      `<button data-ex="${ex.id}"><b>${esc(ex.name)}</b><span>${esc(ex.description)}</span></button>`).join('');
+  }
   function closeMenus() { $$('.menu').forEach(m => m.classList.remove('open')); }
   $$('.menu > button').forEach(b => b.addEventListener('click', e => {
     e.stopPropagation();
@@ -2441,7 +2433,7 @@ Serial port: ${portLabel(port)}` : '');
     const ex = EXAMPLES.find(x => x.id === b.dataset.ex);
     const pristine = EXAMPLES.some(x => x.code === ta.value) || ta.value.trim() === BLANK.trim() || !ta.value.trim();
     if (!pristine && !confirm(`Load example "${ex.name}"? Your current program and parts will be replaced.\n(Tip: use Save first to keep them.)`)) return;
-    loadProject({ code: ex.code, board: ex.board, jumpers: ex.jumpers, components: JSON.parse(JSON.stringify(ex.components)) });
+    loadProject({ code: ex.code, board: boardId, jumpers: ex.jumpers, components: JSON.parse(JSON.stringify(ex.components)) });
     toast(`Loaded example: ${ex.name}`, 'ok');
   });
 
@@ -2610,7 +2602,7 @@ Serial port: ${portLabel(port)}` : '');
   // ================================================================ init
 
   async function init() {
-    $('#boardSel').innerHTML = Object.entries(BOARDS).map(([id, b]) => `<option value="${id}" title="${esc(b.name)}">Board: ${esc(b.short)}</option>`).join('');
+    $('#boardSel').innerHTML = Object.entries(BOARDS).map(([id, b]) => `<option value="${id}" title="${esc(b.name)}">${esc(b.short)}</option>`).join('');
     $('#boardSel').addEventListener('change', e => changeBoard(e.target.value));
     setBoard(DEFAULT_BOARD);
     try {
@@ -2632,8 +2624,8 @@ Serial port: ${portLabel(port)}` : '');
       try { project = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch (_) { project = null; }
     }
     if (!project || typeof project.code !== 'string') {
-      const ex = EXAMPLES[0];
-      project = { code: ex.code, board: ex.board, jumpers: ex.jumpers, components: JSON.parse(JSON.stringify(ex.components)) };
+      const ex = examplesFor(DEFAULT_BOARD)[0];
+      project = { code: ex.code, board: DEFAULT_BOARD, jumpers: ex.jumpers, components: JSON.parse(JSON.stringify(ex.components)) };
     }
     loadProject(project, { noSave: true });
     updateControls();

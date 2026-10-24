@@ -191,19 +191,27 @@ kbd { border: 1px solid var(--border); border-bottom-width: 2px; padding: 0 5px;
 button.run { color: var(--accent); }
 .sim-controls button.icon { padding: 4px 7px; }
 button.stop { color: var(--danger-text); }
-.status {
-  margin-left: auto;
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  font-size: 12px;
-  white-space: nowrap;
-  justify-content: flex-end;
+/* top-bar selects look like the menu buttons (Examples ▾): button colours and a ▾ arrow */
+.tb-select { position: relative; display: inline-flex; }
+.tb-select select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--panel-3);
+  padding: 5px 24px 5px 11px;
+  cursor: pointer;
 }
-.st-run { color: var(--accent); }
-.st-pause { color: var(--warn); }
-.st-err { color: var(--danger); }
-.st-stop { color: var(--muted); }
+.tb-select select:hover { background: var(--btn-hover); border-color: var(--btn-hover-border); }
+.tb-select::after {
+  content: '▾';
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.tb-select option { background: var(--panel-2); }
+#boardSel { width: 124px; text-overflow: ellipsis; }
+#speedSel { width: 100px; }
 
 .menu { position: relative; }
 .menu-list {
@@ -635,9 +643,6 @@ table.grid th { color: var(--muted); font-weight: 500; position: sticky; top: 0;
 body[data-sim="running"] .file-tab { border-top-color: var(--warn); }
 
 /* ---------------------------------------------------------------- small screens */
-@media (max-width: 1200px) {
-  .status .mono.dim { display: none; }            /* instruction count */
-}
 @media (max-width: 1080px) {
   .topbar { flex-wrap: wrap; row-gap: 6px; }    /* one row no longer fits all controls */
 }
@@ -649,7 +654,6 @@ body[data-sim="running"] .file-tab { border-top-color: var(--warn); }
   .right-pane { display: flex; flex-direction: column; }
   .stage-wrap { height: 60vh; }
   .bottom { height: 45vh; }
-  .status { min-width: 0; margin-left: 0; width: 100%; justify-content: flex-start; }
   .inspector { width: min(270px, calc(100% - 60px)); }
 }
 .insp-warn { margin: 0; font-size: 12px; color: var(--orange-text); }
